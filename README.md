@@ -44,6 +44,13 @@ sudo bash php84-migrator/php84-migrate.sh --rollback
 
 `--run` požaduje potvrzení **MIGRATE**. Před nasazením na další servery doporučujeme používat stejný prověřený commit či tag.
 
+Režimy skriptu:
+
+- `--check`: čtecí diagnostika (výchozí režim)
+- `--run`: záloha, kontrola APT, instalace a přepnutí Apache
+- `--status`: stav PHP a Apache
+- `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
+
 ## Volitelně: vzdálené nasazení přes SSH
 
 Z administrátorského počítače s naklonovaným repozitářem lze místo lokálního spuštění použít:
@@ -55,11 +62,6 @@ bash php84-migrator/deploy.sh root@ete30e --run
 
 Tento postup používá SSH pouze pro spojení s cílovým serverem, nikoliv pro přihlášení ke GitHubu. V případě jiného uživatele musí mít účet příslušná oprávnění `sudo`. Přenos skriptu kontroluje SHA-256.
 
-
-- `--check`: čtecí diagnostika (výchozí režim)
-- `--run`: záloha, kontrola APT, instalace a přepnutí Apache
-- `--status`: stav PHP a Apache
-- `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
 
 ## Kontrola po migraci
 
