@@ -26,8 +26,8 @@ cd sprava-serveru-kit
 Pak stačí jeden příkaz pro server (z kořene repozitáře):
 
 ```bash
-./php84-migrator/deploy.sh admin@ete30e --check
-./php84-migrator/deploy.sh admin@ete30e --run
+bash php84-migrator/deploy.sh admin@ete30e --check
+bash php84-migrator/deploy.sh admin@ete30e --run
 ```
 
 `admin@ete30e` nahraď skutečným SSH účtem se `sudo` oprávněním; lze použít i `root@ete30e`, je-li jeho SSH přístup povolen. `--run` vždy požaduje ruční potvrzení **MIGRATE**. Přenos probíhá přes SSH a kontroluje se SHA-256. **GitHub token ani klíč se na cílový server nepřenáší.** Pozdější spuštění na dalších serverech je stejné, pouze s jiným cílem.
