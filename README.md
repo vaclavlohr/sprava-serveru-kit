@@ -77,6 +77,19 @@ bash php84-migrator/deploy.sh root@ete30e --run
 Tento postup používá SSH pouze pro spojení s cílovým serverem, nikoliv pro přihlášení ke GitHubu. V případě jiného uživatele musí mít účet příslušná oprávnění `sudo`. Přenos skriptu kontroluje SHA-256.
 
 
+## Pokud `--check` prošel, ale `--run` hlásí neaktivní mod_php
+
+Ve verzi 1.2.0 mohla kontrola `apache2ctl -M | grep -q` v kombinaci s `set -o pipefail` skončit falešnou chybou kvůli `SIGPIPE`. Od verze **1.2.1** se výpis Apache načítá jednou a vyhodnocuje bez této roury. Na serveru s již naklonovaným repozitářem spusť:
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+sudo bash php84-migrator/php84-migrate.sh --check
+sudo bash php84-migrator/php84-migrate.sh --run
+```
+
+Jestliže chyba trvá i po aktualizaci, nejprve ověř `apache2ctl -M` a aktivní moduly; neobcházej kontroly úpravou skriptu.
+
 ## Kontrola po migraci
 
 Ověř `php8.4 -v`, `apache2ctl -M`, `systemctl is-active apache2`, vhosty přes HTTPS, přihlášení, práci s DB, formuláře, cron a chybové logy Apache. Zkontroluj také kompatibilitu aplikací, extensions a případné vlastní změny `php.ini`/`.htaccess`.
