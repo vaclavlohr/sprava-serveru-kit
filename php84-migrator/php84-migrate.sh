@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.2.1'
+VERSION='1.2.2'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -167,18 +167,24 @@ apache2ctl -S > "$d/apache-vhosts-before.txt" 2>&1 || true
 php -m > "$d/php-modules-before.txt" 2>&1 || true
 dpkg-query -W 'php*' 'libapache2-mod-php*' > "$d/dpkg-before.txt" 2>&1 || true
 
-# Add the Ondrej PHP PPA for the detected Jammy/Noble release if needed.
-if ! grep -RsEq 'ppa.launchpad(content)?\.net/ondrej/php|ppa:ondrej/php' \
-   /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
-  say 'Installing software-properties-common and enabling ppa:ondrej/php.'
-  apt-get update
+# Do not infer PPA availability from the mere presence of its text in source
+# files: disabled .sources stanzas, comments, and old backup files cause false
+# positives. APT's actual package candidate is the source of truth.
+say 'Refreshing APT metadata and checking the PHP 8.4 candidate.'
+apt-get update
+candidate="$(apt-cache policy "php${TARGET}-cli" | awk '/Candidate:/ {print $2; exit}')"
+if [[ -z "$candidate" || "$candidate" == '(none)' ]]; then
+  say 'PHP 8.4 is not available from active APT sources; enabling ppa:ondrej/php.'
   apt-get install -y software-properties-common
   add-apt-repository -y ppa:ondrej/php
+  apt-get update
+  candidate="$(apt-cache policy "php${TARGET}-cli" | awk '/Candidate:/ {print $2; exit}')"
 fi
-apt-get update
-
-candidate="$(apt-cache policy "php${TARGET}-cli" | awk '/Candidate:/ {print $2; exit}')"
-[[ -n "$candidate" && "$candidate" != '(none)' ]] || fail "No PHP $TARGET candidate in APT."
+if [[ -z "$candidate" || "$candidate" == '(none)' ]]; then
+  say 'PHP candidate is still missing; review whether ppa:ondrej/php is disabled, pinned, or failing during apt-get update.'
+  apt-cache policy "php${TARGET}-cli" || true
+  fail "No PHP $TARGET candidate in active APT repositories; installation has not started."
+fi
 say "APT candidate: $candidate"
 # Compare upstream version numerically (before -debian suffix); do not install an old unfixed build.
 upstream="${candidate%%-*}"
