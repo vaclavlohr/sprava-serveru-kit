@@ -14,36 +14,47 @@ Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšš�
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
 
-## Jediný příkaz pro další server
+## Stažení a spuštění přímo na serveru (doporučeno)
 
-Na **administrátorském počítači**, který má SSH přístup k cílovým serverům a přístup k tomuto **soukromému GitHub repozitáři**, si repozitář jednou naklonuj:
+Pokud jsi již přihlášený na cílovém serveru jako `root` nebo přes `sudo`, nepotřebuješ SSH připojení k GitHubu ani token. Veřejný repozitář stáhneš přes HTTPS:
 
 ```bash
-git clone git@github.com:vaclavlohr/sprava-serveru-kit.git
+git clone https://github.com/vaclavlohr/sprava-serveru-kit.git
 cd sprava-serveru-kit
 ```
 
-Pak stačí jeden příkaz pro server (z kořene repozitáře):
+Nejprve spusť nezásahovou diagnostiku:
 
 ```bash
-bash php84-migrator/deploy.sh admin@ete30e --check
-bash php84-migrator/deploy.sh admin@ete30e --run
+sudo bash php84-migrator/php84-migrate.sh --check
 ```
 
-`admin@ete30e` nahraď skutečným SSH účtem se `sudo` oprávněním; lze použít i `root@ete30e`, je-li jeho SSH přístup povolen. `--run` vždy požaduje ruční potvrzení **MIGRATE**. Přenos probíhá přes SSH a kontroluje se SHA-256. **GitHub token ani klíč se na cílový server nepřenáší.** Pozdější spuštění na dalších serverech je stejné, pouze s jiným cílem.
-
-**Důležité:** před každou sérií nasazení použij zkontrolovaný commit, ideálně konkrétní tag/SHA, a neměň ho během série. Nepoužívej `curl | bash` z privátního GitHubu ani token ve veřejném URL.
-
-## Lokální použití na serveru
-
-Pokud jsi skript přenesl na server jinou ověřenou cestou:
+Po kontrole výstupu a zajištění zálohy/snapshotu proveď migraci:
 
 ```bash
-sudo bash php84-migrate.sh --check
-sudo bash php84-migrate.sh --run
-sudo bash php84-migrate.sh --status
-sudo bash php84-migrate.sh --rollback
+sudo bash php84-migrator/php84-migrate.sh --run
 ```
+
+Kontrola stavu a případný návrat:
+
+```bash
+sudo bash php84-migrator/php84-migrate.sh --status
+sudo bash php84-migrator/php84-migrate.sh --rollback
+```
+
+`--run` požaduje potvrzení **MIGRATE**. Před nasazením na další servery doporučujeme používat stejný prověřený commit či tag.
+
+## Volitelně: vzdálené nasazení přes SSH
+
+Z administrátorského počítače s naklonovaným repozitářem lze místo lokálního spuštění použít:
+
+```bash
+bash php84-migrator/deploy.sh root@ete30e --check
+bash php84-migrator/deploy.sh root@ete30e --run
+```
+
+Tento postup používá SSH pouze pro spojení s cílovým serverem, nikoliv pro přihlášení ke GitHubu. V případě jiného uživatele musí mít účet příslušná oprávnění `sudo`. Přenos skriptu kontroluje SHA-256.
+
 
 - `--check`: čtecí diagnostika (výchozí režim)
 - `--run`: záloha, kontrola APT, instalace a přepnutí Apache
@@ -58,4 +69,4 @@ Při selhání instalace nebo přepnutí se skript **pokusí** vrátit původní
 
 ## Bezpečnost
 
-Repozitář je **soukromý**. Nevkládej do něj přístupové tokeny, hesla, výpisy konfigurací s tajnými údaji ani archivní zálohy serverů. Script se musí spouštět až po kontrole a v servisním okně. Po úspěšném ověření webových aplikací lze staré PHP odebrat samostatně.
+Repozitář je **veřejný**. Nevkládej do něj přístupové tokeny, hesla, výpisy konfigurací s tajnými údaji ani archivní zálohy serverů. Script se musí spouštět až po kontrole a v servisním okně. Po úspěšném ověření webových aplikací lze staré PHP odebrat samostatně.
