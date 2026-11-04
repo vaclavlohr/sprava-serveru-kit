@@ -9,7 +9,7 @@ Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšš�
 - Ubuntu **22.04 nebo 24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3.
 - Záměrně **odmítá** konfigurace PHP-FPM, `proxy_fcgi`, Ubuntu 20.04 a jiné distribuce; **není** určen pro AlmaLinux, nginx nebo kontejnery. Verzi OS kontroluje přes `/etc/os-release`, nikoli podle jádra z `uname -a`.
 - Zjistí instalované balíčky PHP a pokusí se nainstalovat odpovídající balíčky `php8.4-*` včetně Apache modulu.
-- Přidá `ppa:ondrej/php` pouze pokud není nakonfigurováno, ověří dostupnost opravené verze **alespoň 8.4.27** a simuluje APT bez odstraňování balíčků.
+- Ověří skutečnou dostupnost PHP 8.4 v aktivních zdrojích APT; pokud balíček chybí, pokusí se aktivovat `ppa:ondrej/php`, obnoví metadata a kontrolu zopakuje. Vyžaduje opravenou verzi **alespoň 8.4.27** a simuluje APT bez odstraňování balíčků.
 - Zálohuje `/etc/php` a `/etc/apache2` do `/var/backups/php84-migrator/`; uchovává předchozí handler a CLI alternativu pro rollback.
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
@@ -89,6 +89,21 @@ sudo bash php84-migrator/php84-migrate.sh --run
 ```
 
 Jestliže chyba trvá i po aktualizaci, nejprve ověř `apache2ctl -M` a aktivní moduly; neobcházej kontroly úpravou skriptu.
+
+## PHP 8.4 se nenabízí v APT (Ubuntu 22.04 / 24.04)
+
+Ve verzích před 1.2.2 skript hledal text `ondrej/php` v souborech APT, což mohlo chybně vyhodnotit vypnutý nebo historický zdroj jako aktivní. **Od verze 1.2.2** kontroluje skutečného kandidáta `php8.4-cli`; pokud neexistuje, pokusí se PPA aktivovat a metadata APT znovu načíst.
+
+Na již naklonovaném serveru aktualizuj skript:
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+apt-cache policy php8.4-cli
+sudo bash php84-migrator/php84-migrate.sh --run
+```
+
+Pokud se kandidát neobjeví ani po pokusu o přidání PPA, skript bezpečně skončí bez instalace PHP. Zkontroluj `apt-cache policy php8.4-cli`, soubory `/etc/apt/sources.list.d/` a případné chyby při `apt-get update`.
 
 ## Kontrola po migraci
 
