@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# PHP 8.4 migration for Ubuntu 24.04 + Apache mod_php.
+# PHP 8.4 migration for Ubuntu 22.04/24.04 + Apache mod_php.
 # Supports one-command migration with explicit operator approval.
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.1.0'
+VERSION='1.2.0'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -29,7 +29,7 @@ Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback]
   --run         Backup, install PHP 8.4, switch Apache; prompts before changes.
   --status      Display Apache and PHP version/status.
   --rollback    Restore previous Apache PHP module and CLI alternative.
-Requirements: Ubuntu 24.04, Apache mod_php, root. No PHP-FPM migration.
+Requirements: Ubuntu 22.04 or 24.04, Apache mod_php, root. No PHP-FPM migration.
 The old PHP packages remain installed; rollback only switches configuration.
 EOF
   exit 0
@@ -41,10 +41,20 @@ need apt-get
 need update-alternatives
 
 if [[ "$ACTION" != '--rollback' && "$ACTION" != '--status' ]]; then
-  # Fail closed outside the tested operating system and web stack.
+  # Determine the Ubuntu release from os-release, never from the running kernel.
+  [[ -r /etc/os-release ]] || fail 'Cannot read /etc/os-release.'
   # shellcheck source=/dev/null
   source /etc/os-release
-  [[ "$ID" == 'ubuntu' && "$VERSION_ID" == '24.04' ]] || fail 'Only Ubuntu 24.04 is supported.'
+  [[ "${ID:-}" == 'ubuntu' ]] || fail "Only Ubuntu is supported (detected: ${ID:-unknown})."
+  case "${VERSION_ID:-}" in
+    22.04)
+      [[ "${VERSION_CODENAME:-}" == 'jammy' ]] || fail 'Ubuntu 22.04 codename mismatch; review OS installation.'
+      ;;
+    24.04)
+      [[ "${VERSION_CODENAME:-}" == 'noble' ]] || fail 'Ubuntu 24.04 codename mismatch; review OS installation.'
+      ;;
+    *) fail "Ubuntu ${VERSION_ID:-unknown} is not supported for automated PHP migration. Supported releases: 22.04 (Jammy) and 24.04 (Noble); upgrade the OS first if older." ;;
+  esac
   systemctl is-active --quiet apache2 || fail 'Apache is not running.'
   apache2ctl -M 2>/dev/null | grep -qE 'mpm_prefork_module' || fail 'Apache is not using mpm_prefork.'
   apache2ctl -M 2>/dev/null | grep -qE '^ php_module ' || fail 'Apache mod_php is not active.'
@@ -109,7 +119,7 @@ rollback() {
 if [[ "$ACTION" == '--rollback' ]]; then rollback; exit 0; fi
 
 old="$(active_php_module)"
-say "OS: Ubuntu 24.04, Apache mod_php $old -> PHP $TARGET (minimum $MIN_FIXED)"
+say "OS: Ubuntu ${VERSION_ID} (${VERSION_CODENAME}), Apache mod_php $old -> PHP $TARGET (minimum $MIN_FIXED)"
 status
 if [[ "$old" == "$TARGET" ]]; then say 'Apache already uses PHP 8.4; no migration necessary.'; exit 0; fi
 [[ "$old" =~ ^(7\.[0-9]+|8\.[0-3])$ ]] || fail "Unsupported source PHP module $old"
@@ -153,7 +163,7 @@ apache2ctl -S > "$d/apache-vhosts-before.txt" 2>&1 || true
 php -m > "$d/php-modules-before.txt" 2>&1 || true
 dpkg-query -W 'php*' 'libapache2-mod-php*' > "$d/dpkg-before.txt" 2>&1 || true
 
-# Add only the official Ondrej PPA for Noble if no source contains it.
+# Add the Ondrej PHP PPA for the detected Jammy/Noble release if needed.
 if ! grep -RsEq 'ppa.launchpad(content)?\.net/ondrej/php|ppa:ondrej/php' \
    /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
   say 'Installing software-properties-common and enabling ppa:ondrej/php.'
