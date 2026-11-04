@@ -1,18 +1,26 @@
 # Správa serverů KIT – migrace PHP 8.0 → PHP 8.4
 
-Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšší** na **Ubuntu 24.04 (Noble)**. Cílem je připravit jednotný postup pro servery podobné `ete2ae` a `ete30e`.
+Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšší** na **Ubuntu 22.04 (Jammy) nebo 24.04 (Noble)**. Cílem je připravit jednotný postup pro servery podobné `ete2ae` a `ete30e`.
 
 > ⚠️ Produkční zásah: před použitím je nutná záloha webů a databází / snapshot virtuálního serveru a servisní okno. Úspěšný restart Apache **není** důkazem kompatibility aplikace s PHP 8.4.
 
 ## Pro jaké servery je nástroj určen
 
-- Ubuntu **24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3.
-- Záměrně **odmítá** konfigurace PHP-FPM, `proxy_fcgi` a jiné distribuce; **není** určen pro AlmaLinux, nginx nebo kontejnery.
+- Ubuntu **22.04 nebo 24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3.
+- Záměrně **odmítá** konfigurace PHP-FPM, `proxy_fcgi`, Ubuntu 20.04 a jiné distribuce; **není** určen pro AlmaLinux, nginx nebo kontejnery. Verzi OS kontroluje přes `/etc/os-release`, nikoli podle jádra z `uname -a`.
 - Zjistí instalované balíčky PHP a pokusí se nainstalovat odpovídající balíčky `php8.4-*` včetně Apache modulu.
 - Přidá `ppa:ondrej/php` pouze pokud není nakonfigurováno, ověří dostupnost opravené verze **alespoň 8.4.27** a simuluje APT bez odstraňování balíčků.
 - Zálohuje `/etc/php` a `/etc/apache2` do `/var/backups/php84-migrator/`; uchovává předchozí handler a CLI alternativu pro rollback.
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
+
+## Ověření verze operačního systému
+
+```bash
+cat /etc/os-release | grep -E '^(PRETTY_NAME|VERSION_ID|VERSION_CODENAME)='
+```
+
+Jádro `5.15` samo o sobě neprokazuje Ubuntu 22.04: může jít i o jinou verzi Ubuntu s HWE jádrem. Pro automatickou migraci skript povolí pouze Jammy a Noble. Na Ubuntu 20.04 je nutné nejprve naplánovat upgrade OS. PHP 8.4 musí být dostupné v APT pro konkrétní distribuci a skript před instalací ověřuje, že jde alespoň o verzi 8.4.27.
 
 ## Stažení a spuštění přímo na serveru (doporučeno)
 
@@ -21,6 +29,12 @@ Pokud jsi již přihlášený na cílovém serveru jako `root` nebo přes `sudo`
 ```bash
 git clone https://github.com/vaclavlohr/sprava-serveru-kit.git
 cd sprava-serveru-kit
+```
+
+Pokud už máš repozitář naklonovaný (například na `ete34e`), místo opakovaného `git clone` aktualizuj pracovní kopii:
+
+```bash
+git pull --ff-only
 ```
 
 Nejprve spusť nezásahovou diagnostiku:
