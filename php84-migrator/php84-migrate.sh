@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.2.0'
+VERSION='1.2.1'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -56,9 +56,12 @@ if [[ "$ACTION" != '--rollback' && "$ACTION" != '--status' ]]; then
     *) fail "Ubuntu ${VERSION_ID:-unknown} is not supported for automated PHP migration. Supported releases: 22.04 (Jammy) and 24.04 (Noble); upgrade the OS first if older." ;;
   esac
   systemctl is-active --quiet apache2 || fail 'Apache is not running.'
-  apache2ctl -M 2>/dev/null | grep -qE 'mpm_prefork_module' || fail 'Apache is not using mpm_prefork.'
-  apache2ctl -M 2>/dev/null | grep -qE '^ php_module ' || fail 'Apache mod_php is not active.'
-  if apache2ctl -M 2>/dev/null | grep -q 'proxy_fcgi_module'; then
+  # Capture the complete module list once. grep -q on a pipeline under
+  # pipefail can close the reader early (SIGPIPE), falsely failing checks.
+  apache_modules="$(apache2ctl -M 2>/dev/null)" || fail 'Could not inspect Apache loaded modules.'
+  [[ "$apache_modules" == *mpm_prefork_module* ]] || fail 'Apache is not using mpm_prefork.'
+  [[ "$apache_modules" =~ [[:space:]]php_module[[:space:]] ]] || fail 'Apache mod_php is not active.'
+  if [[ "$apache_modules" == *proxy_fcgi_module* ]]; then
     fail 'proxy_fcgi is enabled; review FPM configuration manually.'
   fi
   if grep -RIEqs '(php[0-9]+\.[0-9]+-fpm|/run/php/.*fpm\.sock|ProxyPassMatch)' \
@@ -124,8 +127,9 @@ status
 if [[ "$old" == "$TARGET" ]]; then say 'Apache already uses PHP 8.4; no migration necessary.'; exit 0; fi
 [[ "$old" =~ ^(7\.[0-9]+|8\.[0-3])$ ]] || fail "Unsupported source PHP module $old"
 
-dpkg-query -W -f='${db:Status-Abbrev}\n' "libapache2-mod-php${old}" 2>/dev/null | grep -q '^ii' || \
+installed_apache_pkg="$(dpkg-query -W -f='${db:Status-Abbrev}' "libapache2-mod-php${old}" 2>/dev/null)" || \
   fail "Source Apache package libapache2-mod-php${old} is not installed."
+[[ "$installed_apache_pkg" == ii* ]] || fail "Source Apache package libapache2-mod-php${old} is not installed."
 
 # Build extension list from installed Debian packages (source version -> target version).
 pkgs=("php${TARGET}-cli" "php${TARGET}-common" "php${TARGET}-opcache" "php${TARGET}-readline")
