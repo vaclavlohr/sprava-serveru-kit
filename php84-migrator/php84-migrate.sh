@@ -233,27 +233,39 @@ inventory() {
   if [[ "$ACTION" == '--check' ]]; then
     if [[ "${ID:-}" == almalinux ]]; then
       if [[ "${VERSION_ID:-}" != 9 && "${VERSION_ID:-}" != 9.* ]]; then
-        errors+=('AlmaLinux automatic updates are supported only on major version 9')
+        errors+=('AlmaLinux automatic PHP switch is supported only on AlmaLinux 9')
       fi
-      if ! command -v dnf >/dev/null 2>&1; then
-        errors+=('DNF is unavailable')
+      if ! command -v dnf >/dev/null 2>&1 || ! command -v rpm >/dev/null 2>&1; then
+        errors+=('DNF/RPM is not available')
+      fi
+      if ! command -v php >/dev/null 2>&1; then
+        errors+=('Default PHP CLI executable is missing')
+      else
+        local php_minor=''
+        php_minor="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)" || true
+        [[ "$php_minor" =~ ^(7[.][0-4]|8[.][0-4])$ ]] ||
+          errors+=("PHP CLI version ${php_minor:-unknown} is not in supported migration range")
       fi
       if [[ "$(systemctl is-active php-fpm 2>/dev/null || true)" != active ]]; then
-        errors+=('Standard php-fpm service is not active; PHP handler needs review')
+        errors+=('Standard php-fpm service is not active; its handler must be reviewed')
       fi
-      if ! command -v php >/dev/null 2>&1 || [[ "$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)" != 8.4 ]]; then
-        errors+=('PHP CLI is not 8.4; module switching is not automated')
+      if command -v rpm >/dev/null 2>&1; then
+        rpm -q php-cli php-common php-fpm >/dev/null 2>&1 ||
+          errors+=('At least one standard PHP RPM (php-cli/php-common/php-fpm) is missing')
       fi
-      local enabled_php=''
-      enabled_php="$(dnf -q module list php --enabled 2>/dev/null)" || true
-      [[ "$enabled_php" =~ remi-8\.4 ]] || errors+=('PHP module stream remi-8.4 is not enabled')
+      if command -v dnf >/dev/null 2>&1; then
+        local module_catalog=''
+        module_catalog="$(dnf -q module list php 2>/dev/null)" || true
+        [[ "$module_catalog" =~ remi-8[.]4 ]] ||
+          errors+=('Target module remi-8.4 is not available; Remi repository required')
+      fi
       if (( ${#errors[@]} )); then
-        say 'AlmaLinux 9: automatic PHP 8.4 package update NOT ELIGIBLE (no changes made).'
+        say 'AlmaLinux 9 PHP switch: NOT YET ELIGIBLE (no changes made).'
         for item in "${errors[@]}"; do say "  - $item"; done
-        say 'Review RPM packages, enabled module and PHP-FPM handler before migration.'
+        say 'Resolve reported prerequisites before using --run.'
       else
-        say 'AlmaLinux 9: existing Remi PHP 8.4 update preliminarily ELIGIBLE; no changes made.'
-        say 'Module stream switching and application compatibility are NOT covered.'
+        say 'AlmaLinux 9 PHP switch to Remi 8.4: preliminarily ELIGIBLE (no changes made).'
+        say 'The --run command performs candidate-version and DNF removal-preview checks.'
       fi
     else
       if [[ "${ID:-}" != ubuntu || ( "${VERSION_ID:-}" != 22.04 && "${VERSION_ID:-}" != 24.04 ) ]]; then
