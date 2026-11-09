@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.6.0'
+VERSION='1.7.0'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -33,12 +33,12 @@ if [[ "$ACTION" == '--help' ]]; then
   cat <<'EOF'
 Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback|--disable-mptcp|--restore-mptcp]
   --check       Read-only inventory: Ubuntu / AlmaLinux, Apache/httpd, Nginx, FPM, CLI.
-  --run         Ubuntu: migrate mod_php. AlmaLinux 9: switch PHP 7/8 to Remi 8.4.
+  --run         Ubuntu: mod_php migration or fresh PHP 8.4 CLI; AlmaLinux 9: Remi PHP 8.4 migration.
   --status      Show OS, PHP CLI and web-stack status without requiring Apache.
   --rollback    Restore previous Apache mod_php and CLI alternative.
   --disable-mptcp   Disable MPTCP now and persistently (no Apache/PHP changes).
   --restore-mptcp   Restore MPTCP settings saved by the first disable.
-Automatic --run: Ubuntu 22.04/24.04 Apache mod_php, or AlmaLinux 9
+Automatic --run: Ubuntu 22.04/24.04 Apache mod_php, fresh CLI on Ubuntu 22.04/24.04/26.04, or AlmaLinux 9
 with standard PHP RPMs, active php-fpm and available remi-8.4 module.
 AlmaLinux: previews DNF package removals and requires SWITCH-PHP84 approval.
 --run also disables MPTCP after a successful PHP migration, if supported.
@@ -467,6 +467,140 @@ if [[ "${ID:-}" == almalinux ]]; then
     --run) almalinux_update; exit 0 ;;
     --rollback) fail 'AlmaLinux rollback requires a verified VM snapshot or reviewed DNF history, not Ubuntu mod_php rollback.' ;;
   esac
+fi
+
+# Fresh PHP 8.4 install for Ubuntu including Resolute (26.04).
+# Intentionally CLI-only: never activate a PHP web handler by guessing.
+ubuntu_fresh_install() {
+  local candidate upstream installed_versioned keytmp keypkg answer
+  local backup_dir sury_file arch extension_candidate pkg
+  local -a php_packages=(
+    php8.4-cli php8.4-common php8.4-opcache php8.4-readline
+    php8.4-curl php8.4-mbstring php8.4-xml php8.4-zip
+    php8.4-mysql php8.4-gd
+  )
+  need apt-get
+  need apt-cache
+  need dpkg-query
+  need dpkg
+  need update-alternatives
+  [[ "${ID:-}" == ubuntu ]] || fail 'Fresh PHP installation only supports Ubuntu.'
+  case "${VERSION_ID:-}:${VERSION_CODENAME:-}" in
+    22.04:jammy|24.04:noble|26.04:resolute) ;;
+    *) fail "Fresh PHP 8.4 installation not supported for ${PRETTY_NAME:-unknown}." ;;
+  esac
+  ! command -v php >/dev/null 2>&1 ||
+    fail 'PHP CLI is already present. Refusing a fresh install.'
+  installed_versioned="$(dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' \
+    'php[0-9]*' 'libapache2-mod-php[0-9]*' 2>/dev/null |
+    awk '$2 ~ /^ii/ {print $1}')" || true
+  if [[ -n "$installed_versioned" ]]; then
+    printf '%s\n' "$installed_versioned"
+    fail 'Installed PHP packages found, although php is not in PATH. Review alternatives and web handlers.'
+  fi
+  say "Fresh PHP 8.4 CLI install: Ubuntu ${VERSION_ID} (${VERSION_CODENAME})."
+  say 'No Apache PHP module, PHP-FPM, or web handler will be enabled.'
+  say 'If PHP 8.4 is absent from APT, the signed third-party Sury repository may be added.'
+  read -r -p 'Type INSTALL-PHP84 to proceed with the PHP CLI installation: ' answer < /dev/tty
+  [[ "$answer" == INSTALL-PHP84 ]] || fail 'Cancelled.'
+
+  mkdir -p "$STATE_ROOT"
+  backup_dir="$(mktemp -d "$STATE_ROOT/ubuntu-fresh-$(date +%Y%m%d-%H%M%S)-XXXXXXXX")"
+  say "Backup and diagnostics: $backup_dir"
+  if [[ -d /etc/apt/sources.list.d ]]; then
+    tar -czpf "$backup_dir/apt-sources-before.tar.gz" -C / etc/apt/sources.list.d ||
+      fail 'Unable to back up the APT sources directory.'
+  fi
+  if [[ -f /etc/apt/sources.list ]]; then
+    cp -p /etc/apt/sources.list "$backup_dir/apt-sources.list"
+  fi
+  dpkg-query -W > "$backup_dir/dpkg-before.txt" 2>&1 || true
+  apt-get update
+  candidate="$(apt-cache policy php8.4-cli | awk '$1 == "Candidate:" {print $2}')" ||
+    fail 'Could not inspect PHP 8.4 candidate in APT.'
+
+  if [[ -z "$candidate" || "$candidate" == '(none)' ]]; then
+    if grep -RIEqs 'packages[.]sury[.]org/php' \
+      /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+      fail 'Sury source already exists but PHP 8.4 is unavailable; inspect the repository before proceeding.'
+    fi
+    need dpkg-deb
+    arch="$(dpkg --print-architecture)"
+    case "$arch" in
+      amd64|arm64) ;;
+      *) fail "Sury fresh-install support requires amd64/arm64 (found $arch)." ;;
+    esac
+    say "Configuring signed packages.sury.org/php for Ubuntu ${VERSION_CODENAME}."
+    apt-get install -y ca-certificates curl
+    need curl
+    keytmp="$(mktemp "$backup_dir/sury-keyring.XXXXXXXX.deb")"
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+      https://packages.sury.org/debsuryorg-archive-keyring.deb -o "$keytmp" ||
+      fail 'Failed to download Sury keyring from the official HTTPS repository.'
+    keypkg="$(dpkg-deb -f "$keytmp" Package 2>/dev/null)" ||
+      fail 'Downloaded Sury keyring is not a valid Debian package.'
+    [[ "$keypkg" == debsuryorg-archive-keyring ]] ||
+      fail "Unexpected Sury keyring package: $keypkg"
+    dpkg -i "$keytmp" || fail 'Failed to install Sury archive signing keyring.'
+    [[ -s /usr/share/keyrings/debsuryorg-archive-keyring.gpg ]] ||
+      fail 'Sury keyring unavailable after package installation.'
+    sury_file='/etc/apt/sources.list.d/kit-sury-php.sources'
+    [[ ! -e "$sury_file" && ! -L "$sury_file" ]] ||
+      fail "APT source file already exists: $sury_file"
+    cat > "$sury_file" <<EOF
+Types: deb
+URIs: https://packages.sury.org/php/
+Suites: ${VERSION_CODENAME}
+Components: main
+Architectures: $arch
+Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg
+EOF
+    chmod 0644 "$sury_file"
+    apt-get update
+    candidate="$(apt-cache policy php8.4-cli | awk '$1 == "Candidate:" {print $2}')" ||
+      fail 'Could not check the PHP 8.4 candidate after adding Sury.'
+  fi
+  [[ -n "$candidate" && "$candidate" != '(none)' ]] ||
+    fail 'No PHP 8.4 candidate; no PHP packages installed.'
+  upstream="${candidate%%-*}"
+  upstream="${upstream#*:}"
+  dpkg --compare-versions "$upstream" ge "$MIN_FIXED" ||
+    fail "Candidate $candidate is below minimum PHP $MIN_FIXED."
+  say "PHP 8.4 candidate: $candidate"
+
+  for pkg in "${php_packages[@]}"; do
+    extension_candidate="$(apt-cache policy "$pkg" | awk '$1 == "Candidate:" {print $2}')" ||
+      fail "Candidate lookup failed for $pkg."
+    [[ -n "$extension_candidate" && "$extension_candidate" != '(none)' ]] ||
+      fail "Required PHP extension is unavailable: $pkg."
+  done
+  apt-get -s install "${php_packages[@]}" > "$backup_dir/apt-simulation.txt" ||
+    fail "APT simulation failed; inspect $backup_dir/apt-simulation.txt"
+  if grep -Eq '^(Remv|Purg) ' "$backup_dir/apt-simulation.txt"; then
+    grep -E '^(Remv|Purg) ' "$backup_dir/apt-simulation.txt" || true
+    fail 'APT preview includes removals. No PHP packages were installed.'
+  fi
+  say 'APT simulation passed (no removals). Installing PHP CLI and extensions.'
+  apt-get install -y "${php_packages[@]}" ||
+    fail "PHP installation failed. Review apt logs and $backup_dir."
+  [[ -x /usr/bin/php8.4 ]] || fail 'PHP 8.4 executable is missing after installation.'
+  /usr/bin/php8.4 -r 'exit(version_compare(PHP_VERSION, $argv[1], ">=") ? 0 : 1);' \
+    "$MIN_FIXED" || fail "Installed PHP version is below $MIN_FIXED."
+  update-alternatives --set php /usr/bin/php8.4 ||
+    fail 'PHP installed, but PHP CLI alternative could not be switched.'
+  php -v | sed -n '1p'
+  say "PHP CLI installation completed; metadata backup: $backup_dir"
+  say 'Web use requires separately configuring PHP-FPM or an Apache PHP handler.'
+  mptcp_disable
+}
+
+if [[ "${ID:-}" == ubuntu && "$ACTION" == --run ]] &&
+   ! command -v php >/dev/null 2>&1; then
+  ubuntu_fresh_install
+  exit 0
+fi
+if [[ "${ID:-}" == ubuntu && "$ACTION" == --run && "${VERSION_ID:-}" == 26.04 ]]; then
+  fail 'Ubuntu 26.04 with existing PHP is not eligible for the legacy Apache mod_php migration. Use --check.'
 fi
 
 need apache2ctl
