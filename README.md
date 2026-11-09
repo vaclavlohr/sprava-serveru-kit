@@ -1,18 +1,30 @@
 # Správa serverů KIT – migrace PHP 8.0 → PHP 8.4
 
-Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšší** na **Ubuntu 22.04 (Jammy) nebo 24.04 (Noble)**. Cílem je připravit jednotný postup pro servery podobné `ete2ae` a `ete30e`.
+Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšší** na **Ubuntu 22.04 (Jammy) nebo 24.04 (Noble)**. Diagnostika nově funguje také na serverech bez běžícího Apache (například `ete50e`) a rozpoznává Nginx, PHP-FPM a PHP CLI; tyto odlišné konfigurace zatím **automaticky nemigruje**.
 
 > ⚠️ Produkční zásah: před použitím je nutná záloha webů a databází / snapshot virtuálního serveru a servisní okno. Úspěšný restart Apache **není** důkazem kompatibility aplikace s PHP 8.4.
 
 ## Pro jaké servery je nástroj určen
 
-- Ubuntu **22.04 nebo 24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3.
+- Automatický režim `--run`: Ubuntu **22.04 nebo 24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3. Režimy `--check` a `--status` lze spustit i bez Apache.
 - Záměrně **odmítá** konfigurace PHP-FPM, `proxy_fcgi`, Ubuntu 20.04 a jiné distribuce; **není** určen pro AlmaLinux, nginx nebo kontejnery. Verzi OS kontroluje přes `/etc/os-release`, nikoli podle jádra z `uname -a`.
 - Zjistí instalované balíčky PHP a pokusí se nainstalovat odpovídající balíčky `php8.4-*` včetně Apache modulu.
 - Ověří skutečnou dostupnost PHP 8.4 v aktivních zdrojích APT; pokud balíček chybí, pokusí se aktivovat `ppa:ondrej/php`, obnoví metadata a kontrolu zopakuje. Vyžaduje opravenou verzi **alespoň 8.4.27** a simuluje APT bez odstraňování balíčků.
 - Zálohuje `/etc/php` a `/etc/apache2` do `/var/backups/php84-migrator/`; uchovává předchozí handler a CLI alternativu pro rollback.
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
+
+## Univerzální diagnostika (verze 1.3.0)
+
+`--check` a `--status` už nevyžadují nainstalovaný ani běžící Apache. Vypisují operační systém, PHP CLI, stav Apache a Nginxu, dostupné balíčky a systemd služby PHP-FPM, případné moduly Apache a nakonfigurované virtuální hostitele.
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+sudo bash php84-migrator/php84-migrate.sh --check
+```
+
+Pokud Apache neběží, `--check` úspěšně dokončí inventuru a vypíše **NOT ELIGIBLE** pro automatickou migraci `mod_php` – **neznamená to, že server nevyužívá PHP**. Může používat Nginx + PHP-FPM, samostatné FPM, CLI/cron nebo Apache záměrně mimo provoz. Automatické `--run` nadále vyžaduje **běžící Apache s `mod_php`**, aby nedošlo k nechtěnému startu služby nebo přepnutí jiného PHP handleru. Po zjištění skutečné konfigurace lze připravit bezpečnou migraci dané varianty.
 
 ## Ověření verze operačního systému
 
@@ -60,9 +72,9 @@ sudo bash php84-migrator/php84-migrate.sh --rollback
 
 Režimy skriptu:
 
-- `--check`: čtecí diagnostika (výchozí režim)
+- `--check`: čtecí diagnostika prostředí i bez Apache (výchozí režim)
 - `--run`: záloha, kontrola APT, instalace a přepnutí Apache
-- `--status`: stav PHP a Apache
+- `--status`: stav OS, PHP CLI, Apache, Nginxu a PHP-FPM
 - `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
 
 ## Volitelně: vzdálené nasazení přes SSH
