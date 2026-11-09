@@ -1,0 +1,31 @@
+name: Validate PHP migration scripts
+
+on:
+  push:
+    paths:
+      - "php84-migrator/**"
+      - ".github/workflows/check-scripts.yml"
+  pull_request:
+    paths:
+      - "php84-migrator/**"
+      - ".github/workflows/check-scripts.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bash-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+      - name: Check Bash syntax
+        shell: bash
+        run: |
+          bash -n php84-migrator/php84-migrate.sh
+          bash -n php84-migrator/deploy.sh
+      - name: Test non-destructive commands
+        shell: bash
+        run: |
+          sudo bash php84-migrator/php84-migrate.sh --help
+          sudo bash php84-migrator/php84-migrate.sh --check
