@@ -268,6 +268,25 @@ inventory() {
         say 'The --run command performs candidate-version and DNF removal-preview checks.'
       fi
     else
+      if [[ "${ID:-}" == ubuntu ]] && ! command -v php >/dev/null 2>&1; then
+        case "${VERSION_ID:-}:${VERSION_CODENAME:-}" in
+          22.04:jammy|24.04:noble|26.04:resolute)
+            local existing_versioned=''
+            if command -v dpkg-query >/dev/null 2>&1; then
+              existing_versioned="$(dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' 'php[0-9]*' 'libapache2-mod-php[0-9]*' 2>/dev/null | awk '$2 ~ /^ii/ {print $1}')" || true
+            fi
+            if [[ -z "$existing_versioned" ]]; then
+              say 'Fresh PHP 8.4 CLI install: PRELIMINARILY ELIGIBLE (no changes made).'
+              say 'The --run action will verify the signed PHP repository, package candidates and APT simulation.'
+              say 'PHP-FPM/Apache web handlers will not be enabled automatically.'
+            else
+              say "PHP CLI missing but installed PHP packages detected: $existing_versioned"
+              say 'Fresh installation: NOT ELIGIBLE until the existing PHP/alternatives setup is inspected.'
+            fi
+            return 0
+            ;;
+        esac
+      fi
       if [[ "${ID:-}" != ubuntu || ( "${VERSION_ID:-}" != 22.04 && "${VERSION_ID:-}" != 24.04 ) ]]; then
         errors+=('Automatic mod_php migration supports only Ubuntu 22.04/24.04')
       fi
