@@ -134,7 +134,7 @@ mptcp_restore() {
   else
     say 'MPTCP runtime setting is unavailable; restored persistent configuration only.'
   fi
-  archive="$STATE_ROOT/mptcp-restored-$(date +%Y%m%d-%H%M%S)-$"
+  archive="$STATE_ROOT/mptcp-restored-$(date +%Y%m%d-%H%M%S)-$(date +%N)"
   mv -- "$MPTCP_STATE" "$archive"
   say "MPTCP settings restored; original baseline archived at $archive"
 }
