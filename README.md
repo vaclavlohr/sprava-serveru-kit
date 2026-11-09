@@ -105,6 +105,20 @@ sudo bash php84-migrator/php84-migrate.sh --run
 
 Pokud se kandidát neobjeví ani po pokusu o přidání PPA, skript bezpečně skončí bez instalace PHP. Zkontroluj `apt-cache policy php8.4-cli`, soubory `/etc/apt/sources.list.d/` a případné chyby při `apt-get update`.
 
+## Neočekávané ukončení po `apt-get update` (opraveno v 1.2.3)
+
+Ve verzi 1.2.2 se mohl skript bez zprávy ukončit bezprostředně po aktualizaci indexů APT. Příčinou bylo `awk` s předčasným `exit` v rource pod `set -o pipefail`: `apt-cache` mohl skončit na SIGPIPE (kód 141). Verze **1.2.3** zpracovává celý výstup APT a při neočekávaném selhání vypíše řádek i příkaz.
+
+Pokud migrace skončila před výpisem `APT candidate:` nebo `Installing PHP 8.4`, nedošlo ještě k instalaci balíčků ani k přepnutí Apache. Po aktualizaci pracovní kopie spusť znovu:
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+sudo bash php84-migrator/php84-migrate.sh --run
+```
+
+Skript před každým pokusem vytváří novou zálohu konfigurace. Zálohy aplikací a databází/snapshot serveru jsou přesto odpovědností správce.
+
 ## Kontrola po migraci
 
 Ověř `php8.4 -v`, `apache2ctl -M`, `systemctl is-active apache2`, vhosty přes HTTPS, přihlášení, práci s DB, formuláře, cron a chybové logy Apache. Zkontroluj také kompatibilitu aplikací, extensions a případné vlastní změny `php.ini`/`.htaccess`.
