@@ -1,19 +1,39 @@
 # Správa serverů KIT – migrace PHP 8.0 → PHP 8.4
 
-Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšší** na **Ubuntu 22.04 (Jammy) nebo 24.04 (Noble)**. Diagnostika nově funguje také na serverech bez běžícího Apache (například `ete50e`) a rozpoznává Nginx, PHP-FPM a PHP CLI; tyto odlišné konfigurace zatím **automaticky nemigruje**.
+Skripty pro konzervativní migraci PHP na **8.4.27 nebo vyšší**. Na **Ubuntu 22.04/24.04** migruje Apache `mod_php`; na **AlmaLinuxu 9** rozpoznává `httpd`/PHP-FPM a umí aktualizovat **již používanou** větev `php:remi-8.4`. Univerzální `--check` funguje i na serverech bez běžícího Apache. Automatické přepnutí AlmaLinuxu ze starší větve PHP (např. 8.1 → 8.4) zatím nepodporuje.
 
 > ⚠️ Produkční zásah: před použitím je nutná záloha webů a databází / snapshot virtuálního serveru a servisní okno. Úspěšný restart Apache **není** důkazem kompatibility aplikace s PHP 8.4.
 
 ## Pro jaké servery je nástroj určen
 
 - Automatický režim `--run`: Ubuntu **22.04 nebo 24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3. Režimy `--check` a `--status` lze spustit i bez Apache.
-- Záměrně **odmítá** konfigurace PHP-FPM, `proxy_fcgi`, Ubuntu 20.04 a jiné distribuce; **není** určen pro AlmaLinux, nginx nebo kontejnery. Verzi OS kontroluje přes `/etc/os-release`, nikoli podle jádra z `uname -a`.
+- Ubuntu `--run` záměrně odmítá PHP-FPM, `proxy_fcgi` a jiné webové konfigurace. AlmaLinux 9 má samostatnou větev pouze pro již aktivní modul `php:remi-8.4` s běžící standardní službou `php-fpm`; neprovádí přepnutí modulového streamu. Nepodporované konfigurace se v režimu `--check` pouze diagnostikují.
 - Zjistí instalované balíčky PHP a pokusí se nainstalovat odpovídající balíčky `php8.4-*` včetně Apache modulu.
 - Ověří skutečnou dostupnost PHP 8.4 v aktivních zdrojích APT; pokud balíček chybí, pokusí se aktivovat `ppa:ondrej/php`, obnoví metadata a kontrolu zopakuje. Vyžaduje opravenou verzi **alespoň 8.4.27** a simuluje APT bez odstraňování balíčků.
 - Zálohuje `/etc/php` a `/etc/apache2` do `/var/backups/php84-migrator/`; uchovává předchozí handler a CLI alternativu pro rollback.
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
 - Po úspěšné migraci PHP také vypne MPTCP (`net.mptcp.enabled=0`) za běhu a trvale přes `/etc/sysctl.d/99-zz-kit-disable-mptcp.conf`, pokud jej jádro podporuje. Původní nastavení ukládá pro samostatný návrat.
+
+## AlmaLinux 9 – `httpd`, DNF a Remi (verze 1.5.0)
+
+AlmaLinux nepoužívá Ubuntu nástroje `apache2ctl`, `apt` ani `a2enmod`. Webová služba se zpravidla nazývá `httpd` a PHP zpracovává `php-fpm`. Konfiguraci PHP 8.4 lze na AlmaLinuxu 9 spravovat přes modul `php:remi-8.4`; při přechodu ze starších větví je vhodné použít řízený `dnf module switch-to`, nikoli Debian postup. Prodejci balíčků a rozšíření se mohou lišit, proto není automatické přepnutí staršího streamu v tomto skriptu povoleno.
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+sudo bash php84-migrator/php84-migrate.sh --check
+```
+
+Inventura vypíše stav `httpd`, `php-fpm`, verzi PHP CLI, instalované balíčky RPM a povolené PHP moduly. **`--run` na AlmaLinuxu 9 funguje pouze tehdy, když už PHP CLI používá 8.4, modul `remi-8.4` je aktivní a standardní služba `php-fpm` běží.** V takovém případě ověří kandidáta minimálně 8.4.27, uloží konfiguraci a seznam RPM balíčků do `/var/backups/php84-migrator/`, po potvrzení `UPDATE-ALMA` aktualizuje již nainstalované balíčky PHP a restartuje `php-fpm`. Nakonec zkontroluje PHP a vypne MPTCP, pokud jej jádro podporuje. Nepřidává repozitáře ani nepřepíná modulový stream. Předem zajisti snapshot serveru.
+
+Na AlmaLinuxu zatím **není automatický rollback balíčků**; používá se ověřený snapshot nebo individuálně posouzené `dnf history`. Pokud má server PHP 8.0–8.3, nestartuj ruční migraci bez kontroly výstupu `--check`, zejména modulů Remi a rozšíření.
+
+Samostatné vypnutí MPTCP funguje i na AlmaLinuxu:
+
+```bash
+sudo bash php84-migrator/php84-migrate.sh --disable-mptcp
+```
 
 ## Univerzální diagnostika (verze 1.3.0)
 
@@ -25,7 +45,7 @@ git pull --ff-only
 sudo bash php84-migrator/php84-migrate.sh --check
 ```
 
-Pokud Apache neběží, `--check` úspěšně dokončí inventuru a vypíše **NOT ELIGIBLE** pro automatickou migraci `mod_php` – **neznamená to, že server nevyužívá PHP**. Může používat Nginx + PHP-FPM, samostatné FPM, CLI/cron nebo Apache záměrně mimo provoz. Automatické `--run` nadále vyžaduje **běžící Apache s `mod_php`**, aby nedošlo k nechtěnému startu služby nebo přepnutí jiného PHP handleru. Po zjištění skutečné konfigurace lze připravit bezpečnou migraci dané varianty.
+Pokud Apache neběží, `--check` dokončí inventuru; výsledek **NOT ELIGIBLE** pro Ubuntu `mod_php` neznamená, že server nevyužívá PHP. AlmaLinux se hodnotí zvlášť podle PHP-FPM a Remi. Může používat Nginx + PHP-FPM, samostatné FPM, CLI/cron nebo Apache záměrně mimo provoz. Automatické `--run` nadále vyžaduje **běžící Apache s `mod_php`**, aby nedošlo k nechtěnému startu služby nebo přepnutí jiného PHP handleru. Po zjištění skutečné konfigurace lze připravit bezpečnou migraci dané varianty.
 
 ## Vypnutí MPTCP (verze 1.4.0)
 
@@ -103,7 +123,7 @@ sudo bash php84-migrator/php84-migrate.sh --rollback
 Režimy skriptu:
 
 - `--check`: čtecí diagnostika prostředí i bez Apache (výchozí režim)
-- `--run`: záloha, kontrola APT, instalace a přepnutí Apache
+- `--run`: Ubuntu – migrace Apache mod_php; AlmaLinux 9 – bezpečnostní aktualizace již aktivní větve Remi PHP 8.4
 - `--status`: stav OS, PHP CLI, Apache, Nginxu a PHP-FPM
 - `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
 - `--disable-mptcp`: vypne MPTCP nyní i po restartu (bez zásahu do PHP/Apache)
