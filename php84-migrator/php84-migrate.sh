@@ -290,6 +290,94 @@ if [[ "$ACTION" == '--check' || "$ACTION" == '--status' ]]; then
   exit 0
 fi
 
+# AlmaLinux requires DNF and PHP-FPM, not Debian's mod_php/apt workflow.
+almalinux_update() {
+  local php_minor enabled_stream candidate d confpath answer
+  local -a installed_php=() backup_paths=()
+  need dnf
+  need rpm
+  need php
+  need php-fpm
+  need systemctl
+  [[ "${VERSION_ID:-}" == 9 || "${VERSION_ID:-}" == 9.* ]] ||
+    fail 'AlmaLinux automatic PHP maintenance is limited to major version 9.'
+  systemctl is-active --quiet php-fpm ||
+    fail 'Standard php-fpm service is not active; use --check to identify the PHP handler.'
+  php_minor="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)" ||
+    fail 'Cannot query PHP CLI version.'
+  [[ "$php_minor" == 8.4 ]] ||
+    fail "PHP $php_minor detected. AlmaLinux stream switching is NOT automatic; use --check and review migration."
+  enabled_stream="$(dnf -q module list php --enabled 2>/dev/null)" ||
+    fail 'Cannot inspect enabled DNF module stream.'
+  [[ "$enabled_stream" =~ remi-8[.]4 ]] ||
+    fail 'PHP stream remi-8.4 is not enabled. Refusing any DNF module changes.'
+  php-fpm -t || fail 'Existing PHP-FPM configuration fails validation.'
+  if systemctl is-active --quiet httpd; then
+    need httpd
+    httpd -t || fail 'Existing httpd configtest failed.'
+  fi
+  if systemctl is-active --quiet nginx; then
+    need nginx
+    nginx -t || fail 'Existing nginx configtest failed.'
+  fi
+
+  # Fail closed unless DNF can see a sufficiently new candidate before changes.
+  candidate="$(dnf -q repoquery --latest-limit 1 --qf '%{version}' php-cli 2>/dev/null |
+    awk '$1 ~ /^8[.]4[.][0-9]+$/ {print $1}')" ||
+    fail 'DNF repoquery for PHP failed; check Remi repository metadata.'
+  [[ "$candidate" =~ ^8[.]4[.][0-9]+$ ]] ||
+    fail "Valid PHP 8.4 candidate not found (${candidate:-none})."
+  php -r 'exit(version_compare($argv[1], $argv[2], ">=") ? 0 : 1);' -- "$candidate" "$MIN_FIXED" ||
+    fail "PHP candidate $candidate is older than required $MIN_FIXED."
+  say "AlmaLinux Remi PHP candidate: $candidate"
+  mapfile -t installed_php < <(rpm -qa --qf '%{NAME}\n' |
+    awk '$1 == "php" || $1 ~ /^php-/ {print $1}' | sort -u)
+  (( ${#installed_php[@]} )) || fail 'No standard PHP RPM packages found.'
+  rpm -q php-cli php-fpm >/dev/null ||
+    fail 'Standard php-cli and php-fpm RPM packages must both be installed.'
+  say "Installed PHP packages to update: ${installed_php[*]}"
+  say 'No DNF module switching, repository installation or --allowerasing is performed.'
+  read -r -p 'Type UPDATE-ALMA after taking a full server snapshot: ' answer < /dev/tty
+  [[ "$answer" == UPDATE-ALMA ]] || fail 'Cancelled.'
+
+  mkdir -p "$STATE_ROOT"
+  d="$(mktemp -d "$STATE_ROOT/almalinux-$(date +%Y%m%d-%H%M%S)-XXXXXXXX")"
+  for confpath in /etc/php.ini /etc/php.d /etc/php-fpm.conf /etc/php-fpm.d /etc/httpd /etc/nginx; do
+    [[ -e "$confpath" ]] && backup_paths+=("${confpath#/}")
+  done
+  (( ${#backup_paths[@]} )) || fail 'No configuration paths available for backup.'
+  tar --acls --xattrs -czpf "$d/etc-php-web.tar.gz" -C / "${backup_paths[@]}"
+  rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\n' | sort > "$d/rpm-before.txt"
+  dnf -q module list php --enabled > "$d/php-module-before.txt" 2>&1 || true
+  php -m > "$d/php-modules-before.txt" 2>&1 || true
+  say "AlmaLinux config backup: $d"
+  say 'Updating installed PHP RPMs in the enabled Remi 8.4 stream.'
+  if ! dnf -y --refresh upgrade "${installed_php[@]}"; then
+    fail "DNF update failed; inspect DNF history and $d. No automatic rollback is available."
+  fi
+  php -r 'exit(version_compare(PHP_VERSION, $argv[1], ">=") ? 0 : 1);' -- "$MIN_FIXED" ||
+    fail "Installed PHP remains older than $MIN_FIXED."
+  php-fpm -t || fail "Updated PHP-FPM config invalid; inspect $d."
+  systemctl restart php-fpm || fail 'PHP-FPM restart failed; inspect journalctl -u php-fpm.'
+  systemctl is-active --quiet php-fpm || fail 'PHP-FPM is not running after restart.'
+  if systemctl is-active --quiet httpd; then httpd -t || fail 'httpd configtest failed after update.'; fi
+  if systemctl is-active --quiet nginx; then nginx -t || fail 'nginx configtest failed after update.'; fi
+  say "AlmaLinux update completed: $(php -v | sed -n '1p')"
+  say "Backups in $d. Validate web applications; RPM rollback requires a snapshot."
+  mptcp_disable
+}
+
+if [[ -r /etc/os-release ]]; then
+  # shellcheck source=/dev/null
+  source /etc/os-release
+fi
+if [[ "${ID:-}" == almalinux ]]; then
+  case "$ACTION" in
+    --run) almalinux_update; exit 0 ;;
+    --rollback) fail 'AlmaLinux rollback requires a verified VM snapshot or reviewed DNF history, not Ubuntu mod_php rollback.' ;;
+  esac
+fi
+
 need apache2ctl
 need dpkg-query
 need apt-get
