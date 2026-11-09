@@ -13,6 +13,7 @@ Skripty pro konzervativní migraci Apache `mod_php` na **PHP 8.4.27 nebo vyšš�
 - Zálohuje `/etc/php` a `/etc/apache2` do `/var/backups/php84-migrator/`; uchovává předchozí handler a CLI alternativu pro rollback.
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
+- Po úspěšné migraci PHP také vypne MPTCP (`net.mptcp.enabled=0`) za běhu a trvale přes `/etc/sysctl.d/99-zz-kit-disable-mptcp.conf`, pokud jej jádro podporuje. Původní nastavení ukládá pro samostatný návrat.
 
 ## Univerzální diagnostika (verze 1.3.0)
 
@@ -25,6 +26,35 @@ sudo bash php84-migrator/php84-migrate.sh --check
 ```
 
 Pokud Apache neběží, `--check` úspěšně dokončí inventuru a vypíše **NOT ELIGIBLE** pro automatickou migraci `mod_php` – **neznamená to, že server nevyužívá PHP**. Může používat Nginx + PHP-FPM, samostatné FPM, CLI/cron nebo Apache záměrně mimo provoz. Automatické `--run` nadále vyžaduje **běžící Apache s `mod_php`**, aby nedošlo k nechtěnému startu služby nebo přepnutí jiného PHP handleru. Po zjištění skutečné konfigurace lze připravit bezpečnou migraci dané varianty.
+
+## Vypnutí MPTCP (verze 1.4.0)
+
+MPTCP (Multipath TCP) je volitelná funkce linuxového jádra. `net.mptcp.enabled=0` zakáže vytváření nových MPTCP socketů v příslušném síťovém namespace; neodstraňuje podporu TCP a **nenahrazuje bezpečnostní aktualizaci jádra**.
+
+Skript nastavení zobrazuje při `--check` a `--status`, aniž by cokoli měnil. Po **úspěšné** migraci PHP v režimu `--run` MPTCP také vypne. Pokud systém parametr nemá, krok přeskočí s oznámením. U serverů bez Apache, s Nginx/PHP-FPM nebo s již aktualizovaným PHP lze použít samostatný příkaz, který PHP ani webový server nemění:
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+sudo bash php84-migrator/php84-migrate.sh --disable-mptcp
+```
+
+Vyžaduje potvrzení `MPTCP`, následně provede `sysctl -w net.mptcp.enabled=0` a vytvoří trvalý soubor `/etc/sysctl.d/99-zz-kit-disable-mptcp.conf`. Původní runtime hodnotu a případný původní soubor uloží do `/var/backups/php84-migrator/mptcp-original/`. Opakované spuštění tuto původní zálohu nepřepíše.
+
+Ověření:
+
+```bash
+sysctl net.mptcp.enabled
+cat /etc/sysctl.d/99-zz-kit-disable-mptcp.conf
+```
+
+Pokud je návrat nutný, obnoví se **pouze MPTCP** (po potvrzení `RESTORE-MPTCP`):
+
+```bash
+sudo bash php84-migrator/php84-migrate.sh --restore-mptcp
+```
+
+`--rollback` se vztahuje na modul Apache/CLI, **nikoli** na nastavení MPTCP. Při konfliktu s explicitním `net.mptcp.enabled=1` v `/etc/sysctl.conf` skript změnu odmítne. Pokud jiný soubor `sysctl.d` nastavuje stejnou hodnotu později nebo ji mění jiný správce konfigurace, je potřeba ověřit nastavení i po restartu. Omezení je platné pro aktuální síťový namespace; kontejnery mohou používat vlastní.
 
 ## Ověření verze operačního systému
 
@@ -76,6 +106,8 @@ Režimy skriptu:
 - `--run`: záloha, kontrola APT, instalace a přepnutí Apache
 - `--status`: stav OS, PHP CLI, Apache, Nginxu a PHP-FPM
 - `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
+- `--disable-mptcp`: vypne MPTCP nyní i po restartu (bez zásahu do PHP/Apache)
+- `--restore-mptcp`: obnoví uložené původní nastavení MPTCP
 
 ## Volitelně: vzdálené nasazení přes SSH
 
