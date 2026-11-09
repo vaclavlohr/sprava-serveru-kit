@@ -1,6 +1,6 @@
 # Správa serverů KIT – migrace PHP 8.0 → PHP 8.4
 
-Skripty pro konzervativní migraci PHP na **8.4.27 nebo vyšší**. Na **Ubuntu 22.04/24.04** migruje Apache `mod_php`; na **AlmaLinuxu 9** rozpoznává `httpd`/PHP-FPM, provádí řízený přechod ze standardních RPM PHP 7.x/8.0–8.3 na Remi 8.4 a aktualizuje již aktivní PHP 8.4. Univerzální `--check` funguje i na serverech bez běžícího Apache.
+Skripty pro konzervativní migraci nebo čistou instalaci PHP **8.4.27 či novějšího**. Na **Ubuntu 22.04/24.04** migruje Apache `mod_php`; na **AlmaLinuxu 9** rozpoznává `httpd`/PHP-FPM, provádí řízený přechod ze standardních RPM PHP 7.x/8.0–8.3 na Remi 8.4 a aktualizuje již aktivní PHP 8.4. Univerzální `--check` funguje i na serverech bez běžícího Apache.
 
 > ⚠️ Produkční zásah: před použitím je nutná záloha webů a databází / snapshot virtuálního serveru a servisní okno. Úspěšný restart Apache **není** důkazem kompatibility aplikace s PHP 8.4.
 
@@ -14,6 +14,34 @@ Skripty pro konzervativní migraci PHP na **8.4.27 nebo vyšší**. Na **Ubuntu 
 - Přenese pouze několik explicitních direktiv `php.ini`; ostatní vlastní nastavení je třeba porovnat a doplnit ručně.
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
 - Po úspěšné migraci PHP také vypne MPTCP (`net.mptcp.enabled=0`) za běhu a trvale přes `/etc/sysctl.d/99-zz-kit-disable-mptcp.conf`, pokud jej jádro podporuje. Původní nastavení ukládá pro samostatný návrat.
+
+## Čistá instalace PHP 8.4 na Ubuntu 26.04 (verze 1.7.0)
+
+Ubuntu **26.04 (Resolute)** poskytuje ve výchozích repozitářích PHP 8.5, nikoli PHP 8.4. Pro PHP 8.4 použijeme podepsaný repozitář `https://packages.sury.org/php/`; staré `ppa:ondrej/php` pro Ubuntu 26.04 nepoužívej. Instalátor má jednotný čistý režim pro Ubuntu 22.04, 24.04 a 26.04, pokud dosud nejsou nainstalované verzované balíčky PHP.
+
+```bash
+cd ~/sprava-serveru-kit
+git pull --ff-only
+sudo bash php84-migrator/php84-migrate.sh --check
+```
+
+Pokud výstup uvede `Fresh PHP 8.4 CLI install: PRELIMINARILY ELIGIBLE`, spusť po záloze/snapshotu:
+
+```bash
+sudo bash php84-migrator/php84-migrate.sh --run
+```
+
+Po potvrzení `INSTALL-PHP84` skript provede zálohu zdrojů APT, podle potřeby přidá Sury repozitář s jeho podpisovým keyringem, ověří PHP **alespoň 8.4.27**, simuluje instalaci bez odebírání balíčků a nainstaluje **PHP 8.4 CLI** spolu s rozšířeními `curl`, `mbstring`, `xml`, `zip`, `mysql`, `gd`, `opcache` a `readline`. Následně nastaví příkaz `php` na PHP 8.4 a vypne MPTCP, pokud je podporováno.
+
+**Důležité:** Čistá instalace záměrně **neinstaluje ani neaktivuje PHP-FPM či Apache `mod_php`**, neupravuje Nginx a nemění routování PHP požadavků. Zda má server obsluhovat PHP přes web, musí být stanoveno podle konkrétní konfigurace. Pokud jsou nainstalované verzované PHP balíčky, ale příkaz `php` chybí, skript odmítne čistou instalaci a vyžaduje ověření CLI alternativ. Repozitář Sury je externí zdroj balíčků, nikoli součást Ubuntu; instalační režim je omezen na `amd64` a `arm64`.
+
+Ověření:
+
+```bash
+php -v
+php -m
+sudo bash php84-migrator/php84-migrate.sh --status
+```
 
 ## AlmaLinux 9 – přechod na PHP 8.4 (verze 1.6.0)
 
@@ -131,7 +159,7 @@ sudo bash php84-migrator/php84-migrate.sh --rollback
 Režimy skriptu:
 
 - `--check`: čtecí diagnostika prostředí i bez Apache (výchozí režim)
-- `--run`: Ubuntu – migrace Apache mod_php; AlmaLinux 9 – přepnutí standardního PHP na Remi 8.4 nebo aktualizace aktivního PHP 8.4
+- `--run`: Ubuntu – migrace Apache mod_php nebo čistá instalace PHP 8.4 CLI; AlmaLinux 9 – přepnutí standardního PHP na Remi 8.4 nebo aktualizace aktivního PHP 8.4
 - `--status`: stav OS, PHP CLI, Apache, Nginxu a PHP-FPM
 - `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
 - `--disable-mptcp`: vypne MPTCP nyní i po restartu (bez zásahu do PHP/Apache)
