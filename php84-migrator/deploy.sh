@@ -4,8 +4,8 @@ set -Eeuo pipefail
 umask 077
 
 usage() {
-  echo 'Usage: ./deploy.sh user@server [--check|--run|--status|--rollback]' >&2
-  echo 'Default is --check. --run prompts for MIGRATE on the server.' >&2
+  echo 'Usage: ./deploy.sh user@server [--check|--run|--status|--rollback|--disable-mptcp|--restore-mptcp]' >&2
+  echo 'Default is --check. --run prompts for MIGRATE; MPTCP actions require their own confirmation.' >&2
 }
 
 if (( $# < 1 || $# > 2 )); then usage; exit 2; fi
@@ -13,7 +13,7 @@ remote="$1"
 action="${2:---check}"
 [[ "$remote" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$ ]] || { echo 'Invalid SSH destination.' >&2; exit 2; }
 case "$action" in
-  --check|--run|--status|--rollback) ;;
+  --check|--run|--status|--rollback|--disable-mptcp|--restore-mptcp) ;;
   *) usage; exit 2 ;;
 esac
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
