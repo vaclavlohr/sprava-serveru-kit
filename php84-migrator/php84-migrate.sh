@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.2.2'
+VERSION='1.2.3'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -16,6 +16,10 @@ say() { printf '[php84-migrator] %s\n' "$*"; }
 fail() { printf '[php84-migrator] ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || fail "Missing tool: $1"; }
 require_root() { (( EUID == 0 )) || fail 'Run as root (sudo).'; }
+
+# Unexpected failures must never result in an unexplained silent exit.
+# (Intentional exits from fail() are already reported separately.)
+trap 'rc=$?; printf "[php84-migrator] ERROR: unexpected failure at line %s (exit %s): %s\\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
 
 case "$ACTION" in
   --check|--run|--rollback|--status|--help) ;;
@@ -86,8 +90,8 @@ active_php_module() {
 status() {
   say "Hostname: $(hostname -f 2>/dev/null || hostname)"
   say "Apache PHP module: $(active_php_module)"
-  if command -v php >/dev/null; then php -v | head -1; fi
-  if command -v php8.4 >/dev/null; then php8.4 -v | head -1; fi
+  if command -v php >/dev/null; then php -v | sed -n '1p'; fi
+  if command -v php8.4 >/dev/null; then php8.4 -v | sed -n '1p'; fi
   say "Apache: $(systemctl is-active apache2 || true)"
   apache2ctl -S 2>&1 | grep -E 'namevhost|default server|\*:80' || true
 }
@@ -167,18 +171,20 @@ apache2ctl -S > "$d/apache-vhosts-before.txt" 2>&1 || true
 php -m > "$d/php-modules-before.txt" 2>&1 || true
 dpkg-query -W 'php*' 'libapache2-mod-php*' > "$d/dpkg-before.txt" 2>&1 || true
 
+# Read the complete apt-cache output. An early-exiting awk under pipefail
+# can SIGPIPE apt-cache and silently terminate the migration (exit 141).
 # Do not infer PPA availability from the mere presence of its text in source
 # files: disabled .sources stanzas, comments, and old backup files cause false
 # positives. APT's actual package candidate is the source of truth.
 say 'Refreshing APT metadata and checking the PHP 8.4 candidate.'
 apt-get update
-candidate="$(apt-cache policy "php${TARGET}-cli" | awk '/Candidate:/ {print $2; exit}')"
+candidate="$(apt-cache policy "php${TARGET}-cli" | awk '$1 == "Candidate:" {print $2}')"
 if [[ -z "$candidate" || "$candidate" == '(none)' ]]; then
   say 'PHP 8.4 is not available from active APT sources; enabling ppa:ondrej/php.'
   apt-get install -y software-properties-common
   add-apt-repository -y ppa:ondrej/php
   apt-get update
-  candidate="$(apt-cache policy "php${TARGET}-cli" | awk '/Candidate:/ {print $2; exit}')"
+  candidate="$(apt-cache policy "php${TARGET}-cli" | awk '$1 == "Candidate:" {print $2}')"
 fi
 if [[ -z "$candidate" || "$candidate" == '(none)' ]]; then
   say 'PHP candidate is still missing; review whether ppa:ondrej/php is disabled, pinned, or failing during apt-get update.'
@@ -192,7 +198,7 @@ upstream="${upstream#*:}"
 dpkg --compare-versions "$upstream" ge "$MIN_FIXED" || fail "Candidate PHP $candidate is older than $MIN_FIXED."
 
 for pkg in "${pkgs[@]}" "libapache2-mod-php${TARGET}"; do
-  c="$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2; exit}')"
+  c="$(apt-cache policy "$pkg" | awk '$1 == "Candidate:" {print $2}')"
   [[ -n "$c" && "$c" != '(none)' ]] || fail "Unavailable extension: $pkg"
 done
 
@@ -270,7 +276,7 @@ update-alternatives --set php "/usr/bin/php${TARGET}" || say 'CLI alternative wa
 current="$(active_php_module)"
 [[ "$current" == "$TARGET" ]] || fail "Wrong Apache module: $current"
 systemctl is-active --quiet apache2 || fail 'Apache did not remain active.'
-"/usr/bin/php${TARGET}" -v | head -1
+"/usr/bin/php${TARGET}" -v | sed -n '1p'
 say 'Migration completed. Old PHP packages remain installed for manual rollback.'
 say "Backup: $d"
 say 'IMPORTANT: Test all site URLs and application functionality (login, forms, DB, cron).'
