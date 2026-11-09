@@ -6,11 +6,14 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.3.0'
+VERSION='1.4.0'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
 ACTION="${1:---check}"
+MPTCP_CONF='/etc/sysctl.d/99-zz-kit-disable-mptcp.conf'
+MPTCP_PROC='/proc/sys/net/mptcp/enabled'
+MPTCP_STATE="$STATE_ROOT/mptcp-original"
 
 say() { printf '[php84-migrator] %s\n' "$*"; }
 fail() { printf '[php84-migrator] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -22,24 +25,130 @@ require_root() { (( EUID == 0 )) || fail 'Run as root (sudo).'; }
 trap 'rc=$?; printf "[php84-migrator] ERROR: unexpected failure at line %s (exit %s): %s\\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
 
 case "$ACTION" in
-  --check|--run|--rollback|--status|--help) ;;
+  --check|--run|--rollback|--status|--disable-mptcp|--restore-mptcp|--help) ;;
   *) fail "Unknown action: $ACTION (use --help)" ;;
 esac
 
 if [[ "$ACTION" == '--help' ]]; then
   cat <<'EOF'
-Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback]
+Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback|--disable-mptcp|--restore-mptcp]
   --check       Read-only inventory: Apache, Nginx, PHP-FPM, PHP CLI (default).
   --run         Backup, install PHP 8.4 and switch RUNNING Apache mod_php.
   --status      Show OS, PHP CLI and web-stack status without requiring Apache.
   --rollback    Restore previous Apache mod_php and CLI alternative.
+  --disable-mptcp   Disable MPTCP now and persistently (no Apache/PHP changes).
+  --restore-mptcp   Restore MPTCP settings saved by the first disable.
 Automatic --run: Ubuntu 22.04/24.04, active Apache mod_php, root.
 Inactive Apache, Nginx, PHP-FPM, CLI-only: read-only diagnostics for now.
-The old PHP packages remain installed; rollback only switches configuration.
+--run also disables MPTCP after a successful PHP migration, if supported.
+The old PHP packages remain installed. PHP rollback does NOT restore MPTCP.
 EOF
   exit 0
 fi
 require_root
+
+# MPTCP hardening is independent of PHP and Apache. Keep the original runtime
+# value and our managed config file for an explicit, auditable restoration.
+mptcp_status() {
+  if [[ -r "$MPTCP_PROC" ]]; then
+    say "MPTCP runtime: $(<"$MPTCP_PROC") (0=disabled; 1=enabled)"
+  else
+    say 'MPTCP runtime: unavailable in current network namespace/kernel; nothing to disable'
+  fi
+  if [[ -f "$MPTCP_CONF" ]]; then
+    say "MPTCP persistent override: $MPTCP_CONF"
+  else
+    say 'MPTCP persistent override: not installed by this script'
+  fi
+}
+
+mptcp_disable() {
+  local current state_tmp config_tmp
+  need sysctl
+  if [[ ! -r "$MPTCP_PROC" || ! -w "$MPTCP_PROC" ]]; then
+    say 'MPTCP kernel setting unavailable or read-only; skipping MPTCP change.'
+    return 0
+  fi
+  current="$(<"$MPTCP_PROC")"
+  [[ "$current" == 0 || "$current" == 1 ]] || fail "Unexpected MPTCP value: $current"
+  [[ ! -L "$MPTCP_CONF" ]] || fail "MPTCP config path is a symlink; refusing to overwrite: $MPTCP_CONF"
+  [[ ! -e "$MPTCP_CONF" || -f "$MPTCP_CONF" ]] || fail "MPTCP config path is not a regular file: $MPTCP_CONF"
+
+  # procps sysctl --system may process /etc/sysctl.conf after sysctl.d;
+  # fail rather than promise persistence if it explicitly re-enables MPTCP.
+  if [[ -f /etc/sysctl.conf ]] &&
+     grep -Eq '^[[:space:]]*net[./]mptcp[./]enabled[[:space:]]*=[[:space:]]*1([[:space:]#]|$)' /etc/sysctl.conf; then
+    fail '/etc/sysctl.conf explicitly enables MPTCP; resolve the conflict before migration.'
+  fi
+
+  mkdir -p "$STATE_ROOT"
+  if [[ ! -e "$MPTCP_STATE" ]]; then
+    state_tmp="$(mktemp -d "$STATE_ROOT/.mptcp-original.XXXXXXXX")"
+    printf '%s\n' "$current" > "$state_tmp/runtime"
+    if [[ -f "$MPTCP_CONF" ]]; then
+      printf 'yes\n' > "$state_tmp/had-file"
+      cp -p -- "$MPTCP_CONF" "$state_tmp/config"
+    else
+      printf 'no\n' > "$state_tmp/had-file"
+    fi
+    mv -- "$state_tmp" "$MPTCP_STATE"
+    say "Original MPTCP state saved in $MPTCP_STATE"
+  fi
+
+  config_tmp="$(mktemp /etc/sysctl.d/.kit-disable-mptcp.XXXXXXXX)"
+  printf '# Managed by sprava-serveru-kit php84-migrate.sh\nnet.mptcp.enabled = 0\n' > "$config_tmp"
+  chmod 0644 "$config_tmp"
+  mv -f -- "$config_tmp" "$MPTCP_CONF"
+  if ! sysctl -w net.mptcp.enabled=0; then
+    fail 'Unable to apply net.mptcp.enabled=0 at runtime; inspect kernel settings.'
+  fi
+  [[ "$(<"$MPTCP_PROC")" == 0 ]] || fail 'MPTCP remains enabled after sysctl -w.'
+  say "MPTCP disabled now and configured after reboot: $MPTCP_CONF"
+  say 'If other sysctl.d files override this key later, investigate their ordering.'
+}
+
+mptcp_restore() {
+  local had_file previous_runtime archive
+  need sysctl
+  [[ -d "$MPTCP_STATE" && -f "$MPTCP_STATE/runtime" && -f "$MPTCP_STATE/had-file" ]] ||
+    fail 'No saved MPTCP baseline available for restoration.'
+  previous_runtime="$(<"$MPTCP_STATE/runtime")"
+  had_file="$(<"$MPTCP_STATE/had-file")"
+  [[ "$previous_runtime" == 0 || "$previous_runtime" == 1 ]] || fail 'Invalid saved MPTCP runtime state.'
+  [[ ! -L "$MPTCP_CONF" ]] || fail 'Refusing to restore through a symlink.'
+  case "$had_file" in
+    yes)
+      [[ -f "$MPTCP_STATE/config" ]] || fail 'Original MPTCP config backup is missing.'
+      cp -p -- "$MPTCP_STATE/config" "$MPTCP_CONF"
+      ;;
+    no) rm -f -- "$MPTCP_CONF" ;;
+    *) fail 'Invalid saved MPTCP file state.' ;;
+  esac
+  if [[ -w "$MPTCP_PROC" ]]; then
+    sysctl -w "net.mptcp.enabled=$previous_runtime" ||
+      fail 'Original config restored but runtime MPTCP value could not be restored.'
+  else
+    say 'MPTCP runtime setting is unavailable; restored persistent configuration only.'
+  fi
+  archive="$STATE_ROOT/mptcp-restored-$(date +%Y%m%d-%H%M%S)-$"
+  mv -- "$MPTCP_STATE" "$archive"
+  say "MPTCP settings restored; original baseline archived at $archive"
+}
+
+if [[ "$ACTION" == '--disable-mptcp' ]]; then
+  read -r -p 'Type MPTCP to disable Multipath TCP on this host: ' answer < /dev/tty
+  [[ "$answer" == MPTCP ]] || fail 'Cancelled.'
+  mptcp_disable
+  mptcp_status
+  exit 0
+fi
+if [[ "$ACTION" == '--restore-mptcp' ]]; then
+  read -r -p 'Type RESTORE-MPTCP to restore the saved setting: ' answer < /dev/tty
+  [[ "$answer" == RESTORE-MPTCP ]] || fail 'Cancelled.'
+  mptcp_restore
+  mptcp_status
+  exit 0
+fi
 
 # Read-only inventory on all hosts, including hosts without Apache.
 # Preserve strict safety checks for --run/--rollback below.
@@ -73,6 +182,7 @@ inventory() {
     fpm_packages="$(dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' 'php*-fpm' 2>/dev/null | awk '$2 ~ /^ii/ {print $1}' | paste -sd ',' -)" || true
   fi
   say "Installed PHP-FPM packages: ${fpm_packages:-none}"
+  mptcp_status
   if [[ -n "$php_fpm_services" ]]; then
     say "PHP-FPM services:"
     printf '%s\n' "$php_fpm_services"
@@ -217,7 +327,11 @@ if [[ "$ACTION" == '--rollback' ]]; then rollback; exit 0; fi
 old="$(active_php_module)"
 say "OS: Ubuntu ${VERSION_ID} (${VERSION_CODENAME}), Apache mod_php $old -> PHP $TARGET (minimum $MIN_FIXED)"
 status
-if [[ "$old" == "$TARGET" ]]; then say 'Apache already uses PHP 8.4; no migration necessary.'; exit 0; fi
+if [[ "$old" == "$TARGET" ]]; then
+  say 'Apache already uses PHP 8.4; no PHP migration necessary.'
+  say 'For MPTCP hardening on this server, use --disable-mptcp (independent action).'
+  exit 0
+fi
 [[ "$old" =~ ^(7\.[0-9]+|8\.[0-3])$ ]] || fail "Unsupported source PHP module $old"
 
 installed_apache_pkg="$(dpkg-query -W -f='${db:Status-Abbrev}' "libapache2-mod-php${old}" 2>/dev/null)" || \
@@ -366,6 +480,8 @@ current="$(active_php_module)"
 [[ "$current" == "$TARGET" ]] || fail "Wrong Apache module: $current"
 systemctl is-active --quiet apache2 || fail 'Apache did not remain active.'
 "/usr/bin/php${TARGET}" -v | sed -n '1p'
+say 'PHP migration passed basic checks; applying requested MPTCP hardening.'
+mptcp_disable
 say 'Migration completed. Old PHP packages remain installed for manual rollback.'
 say "Backup: $d"
 say 'IMPORTANT: Test all site URLs and application functionality (login, forms, DB, cron).'
