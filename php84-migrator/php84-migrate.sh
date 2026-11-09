@@ -82,6 +82,10 @@ mptcp_disable() {
   fi
 
   mkdir -p "$STATE_ROOT"
+  if [[ -e "$MPTCP_STATE" ]]; then
+    [[ -d "$MPTCP_STATE" && -f "$MPTCP_STATE/runtime" && -f "$MPTCP_STATE/had-file" ]] ||
+      fail "Existing MPTCP baseline is incomplete: $MPTCP_STATE"
+  fi
   if [[ ! -e "$MPTCP_STATE" ]]; then
     state_tmp="$(mktemp -d "$STATE_ROOT/.mptcp-original.XXXXXXXX")"
     printf '%s\n' "$current" > "$state_tmp/runtime"
