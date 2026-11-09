@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.4.0'
+VERSION='1.5.0'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -32,14 +32,15 @@ esac
 if [[ "$ACTION" == '--help' ]]; then
   cat <<'EOF'
 Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback|--disable-mptcp|--restore-mptcp]
-  --check       Read-only inventory: Apache, Nginx, PHP-FPM, PHP CLI (default).
-  --run         Backup, install PHP 8.4 and switch RUNNING Apache mod_php.
+  --check       Read-only inventory: Ubuntu / AlmaLinux, Apache/httpd, Nginx, FPM, CLI.
+  --run         Ubuntu: migrate Apache mod_php. AlmaLinux 9: update existing Remi PHP 8.4.
   --status      Show OS, PHP CLI and web-stack status without requiring Apache.
   --rollback    Restore previous Apache mod_php and CLI alternative.
   --disable-mptcp   Disable MPTCP now and persistently (no Apache/PHP changes).
   --restore-mptcp   Restore MPTCP settings saved by the first disable.
-Automatic --run: Ubuntu 22.04/24.04, active Apache mod_php, root.
-Inactive Apache, Nginx, PHP-FPM, CLI-only: read-only diagnostics for now.
+Automatic --run: Ubuntu 22.04/24.04 Apache mod_php, or AlmaLinux 9 with
+active php-fpm, PHP CLI 8.4 and php:remi-8.4 already enabled.
+AlmaLinux stream SWITCHING (e.g. PHP 8.1 -> 8.4) requires manual review.
 --run also disables MPTCP after a successful PHP migration, if supported.
 The old PHP packages remain installed. PHP rollback does NOT restore MPTCP.
 EOF
@@ -157,13 +158,14 @@ fi
 # Read-only inventory on all hosts, including hosts without Apache.
 # Preserve strict safety checks for --run/--rollback below.
 inventory() {
-  local release='unknown' apache_state='unknown' nginx_state='unknown'
+  local release='unknown' apache_state='unknown' nginx_state='unknown' httpd_state='unknown' distro='unknown'
   local apache_modules='' php_modules='' fpm_packages='' php_fpm_services=''
   local errors=() item
   if [[ -r /etc/os-release ]]; then
     # shellcheck source=/dev/null
     source /etc/os-release
     release="${PRETTY_NAME:-${ID:-unknown}}"
+    distro="${ID:-unknown}"
   fi
   say "Host: $(hostname -f 2>/dev/null || hostname)"
   say "OS: $release"
@@ -177,11 +179,31 @@ inventory() {
   fi
   if command -v systemctl >/dev/null 2>&1; then
     apache_state="$(systemctl is-active apache2 2>/dev/null || true)"
+    httpd_state="$(systemctl is-active httpd 2>/dev/null || true)"
     nginx_state="$(systemctl is-active nginx 2>/dev/null || true)"
     php_fpm_services="$(systemctl list-units --all --plain --no-legend 'php*-fpm.service' 2>/dev/null | sed -n '1,15p')" || true
   fi
-  say "Apache state: $apache_state"
+  say "Apache (Ubuntu apache2): $apache_state"
+  say "Apache (RHEL httpd): $httpd_state"
   say "Nginx state: $nginx_state"
+  if [[ "$distro" == almalinux ]]; then
+    if command -v rpm >/dev/null 2>&1; then
+      say 'Installed RPM PHP packages:'
+      rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\n' 'php*' 2>/dev/null | sort | sed -n '1,35p' || true
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+      say 'Enabled PHP module streams:'
+      dnf -q module list php --enabled 2>&1 | sed -n '1,25p' || true
+    fi
+    if command -v php-fpm >/dev/null 2>&1; then
+      say "PHP-FPM service: $(systemctl is-active php-fpm 2>/dev/null || true)"
+      php-fpm -t 2>&1 | sed -n '1,8p' || true
+    fi
+    if command -v httpd >/dev/null 2>&1; then
+      say 'Apache httpd configuration:'
+      httpd -t 2>&1 || true
+    fi
+  fi
   if command -v dpkg-query >/dev/null 2>&1; then
     fpm_packages="$(dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' 'php*-fpm' 2>/dev/null | awk '$2 ~ /^ii/ {print $1}' | paste -sd ',' -)" || true
   fi
@@ -209,30 +231,56 @@ inventory() {
   fi
 
   if [[ "$ACTION" == '--check' ]]; then
-    if [[ "${ID:-}" != ubuntu || ( "${VERSION_ID:-}" != 22.04 && "${VERSION_ID:-}" != 24.04 ) ]]; then
-      errors+=('Automatic migration supports only Ubuntu 22.04/24.04')
-    fi
-    if [[ "$apache_state" != active ]]; then
-      errors+=('Apache is not running; it will not be started automatically')
-    fi
-    if ! command -v apache2ctl >/dev/null 2>&1; then
-      errors+=('Apache is not installed or apache2ctl is missing')
+    if [[ "${ID:-}" == almalinux ]]; then
+      if [[ "${VERSION_ID:-}" != 9 && "${VERSION_ID:-}" != 9.* ]]; then
+        errors+=('AlmaLinux automatic updates are supported only on major version 9')
+      fi
+      if ! command -v dnf >/dev/null 2>&1; then
+        errors+=('DNF is unavailable')
+      fi
+      if [[ "$(systemctl is-active php-fpm 2>/dev/null || true)" != active ]]; then
+        errors+=('Standard php-fpm service is not active; PHP handler needs review')
+      fi
+      if ! command -v php >/dev/null 2>&1 || [[ "$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)" != 8.4 ]]; then
+        errors+=('PHP CLI is not 8.4; module switching is not automated')
+      fi
+      local enabled_php=''
+      enabled_php="$(dnf -q module list php --enabled 2>/dev/null)" || true
+      [[ "$enabled_php" =~ remi-8\.4 ]] || errors+=('PHP module stream remi-8.4 is not enabled')
+      if (( ${#errors[@]} )); then
+        say 'AlmaLinux 9: automatic PHP 8.4 package update NOT ELIGIBLE (no changes made).'
+        for item in "${errors[@]}"; do say "  - $item"; done
+        say 'Review RPM packages, enabled module and PHP-FPM handler before migration.'
+      else
+        say 'AlmaLinux 9: existing Remi PHP 8.4 update preliminarily ELIGIBLE; no changes made.'
+        say 'Module stream switching and application compatibility are NOT covered.'
+      fi
     else
-      [[ "$apache_modules" == *mpm_prefork_module* ]] || errors+=('Apache prefork MPM not detected')
-      [[ "$apache_modules" =~ [[:space:]]php_module[[:space:]] ]] || errors+=('Apache mod_php not detected')
-      [[ "$apache_modules" != *proxy_fcgi_module* ]] || errors+=('Apache proxy_fcgi enabled; FPM stack requires review')
-    fi
-    if grep -RIEqs '(php[0-9]+\.[0-9]+-fpm|/run/php/.*fpm\.sock|ProxyPassMatch)' \
-      /etc/apache2/sites-enabled /etc/apache2/conf-enabled 2>/dev/null; then
-      errors+=('Apache FPM/proxy handler reference detected')
-    fi
-    if (( ${#errors[@]} )); then
-      say 'Automatic mod_php migration: NOT ELIGIBLE; no changes made.'
-      for item in "${errors[@]}"; do say "  - $item"; done
-      say 'Review the detected web stack before enabling a migration path for it.'
-    else
-      say 'Automatic mod_php migration: preliminarily eligible; no changes made.'
-      say 'APT package availability and application compatibility are checked later.'
+      if [[ "${ID:-}" != ubuntu || ( "${VERSION_ID:-}" != 22.04 && "${VERSION_ID:-}" != 24.04 ) ]]; then
+        errors+=('Automatic mod_php migration supports only Ubuntu 22.04/24.04')
+      fi
+      if [[ "$apache_state" != active ]]; then
+        errors+=('Apache is not running; it will not be started automatically')
+      fi
+      if ! command -v apache2ctl >/dev/null 2>&1; then
+        errors+=('Apache is not installed or apache2ctl is missing')
+      else
+        [[ "$apache_modules" == *mpm_prefork_module* ]] || errors+=('Apache prefork MPM not detected')
+        [[ "$apache_modules" =~ [[:space:]]php_module[[:space:]] ]] || errors+=('Apache mod_php not detected')
+        [[ "$apache_modules" != *proxy_fcgi_module* ]] || errors+=('Apache proxy_fcgi enabled; FPM stack requires review')
+      fi
+      if grep -RIEqs '(php[0-9]+\.[0-9]+-fpm|/run/php/.*fpm\.sock|ProxyPassMatch)' \
+        /etc/apache2/sites-enabled /etc/apache2/conf-enabled 2>/dev/null; then
+        errors+=('Apache FPM/proxy handler reference detected')
+      fi
+      if (( ${#errors[@]} )); then
+        say 'Automatic Ubuntu mod_php migration: NOT ELIGIBLE; no changes made.'
+        for item in "${errors[@]}"; do say "  - $item"; done
+        say 'Review the detected web stack before enabling a migration path for it.'
+      else
+        say 'Automatic Ubuntu mod_php migration: preliminarily ELIGIBLE; no changes made.'
+        say 'APT package availability and application compatibility are checked later.'
+      fi
     fi
   fi
 }
