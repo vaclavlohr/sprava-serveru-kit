@@ -1,13 +1,13 @@
 # Správa serverů KIT – migrace PHP 8.0 → PHP 8.4
 
-Skripty pro konzervativní migraci PHP na **8.4.27 nebo vyšší**. Na **Ubuntu 22.04/24.04** migruje Apache `mod_php`; na **AlmaLinuxu 9** rozpoznává `httpd`/PHP-FPM a umí aktualizovat **již používanou** větev `php:remi-8.4`. Univerzální `--check` funguje i na serverech bez běžícího Apache. Automatické přepnutí AlmaLinuxu ze starší větve PHP (např. 8.1 → 8.4) zatím nepodporuje.
+Skripty pro konzervativní migraci PHP na **8.4.27 nebo vyšší**. Na **Ubuntu 22.04/24.04** migruje Apache `mod_php`; na **AlmaLinuxu 9** rozpoznává `httpd`/PHP-FPM, provádí řízený přechod ze standardních RPM PHP 7.x/8.0–8.3 na Remi 8.4 a aktualizuje již aktivní PHP 8.4. Univerzální `--check` funguje i na serverech bez běžícího Apache.
 
 > ⚠️ Produkční zásah: před použitím je nutná záloha webů a databází / snapshot virtuálního serveru a servisní okno. Úspěšný restart Apache **není** důkazem kompatibility aplikace s PHP 8.4.
 
 ## Pro jaké servery je nástroj určen
 
 - Automatický režim `--run`: Ubuntu **22.04 nebo 24.04**, běžící Apache s **MPM prefork** a právě jedním aktivním `mod_php` řady PHP 7.x nebo 8.0–8.3. Režimy `--check` a `--status` lze spustit i bez Apache.
-- Ubuntu `--run` záměrně odmítá PHP-FPM, `proxy_fcgi` a jiné webové konfigurace. AlmaLinux 9 má samostatnou větev pouze pro již aktivní modul `php:remi-8.4` s běžící standardní službou `php-fpm`; neprovádí přepnutí modulového streamu. Nepodporované konfigurace se v režimu `--check` pouze diagnostikují.
+- Ubuntu `--run` záměrně odmítá PHP-FPM, `proxy_fcgi` a jiné webové konfigurace. AlmaLinux 9 má samostatnou větev s řízeným přepnutím modulu přes `dnf module switch-to php:remi-8.4/common`. Vyžaduje standardní balíčky `php-cli`, `php-common`, `php-fpm`, běžící `php-fpm`, dostupný Remi modul a kandidáta minimálně PHP 8.4.27. Nepodporované konfigurace se v režimu `--check` pouze diagnostikují.
 - Zjistí instalované balíčky PHP a pokusí se nainstalovat odpovídající balíčky `php8.4-*` včetně Apache modulu.
 - Ověří skutečnou dostupnost PHP 8.4 v aktivních zdrojích APT; pokud balíček chybí, pokusí se aktivovat `ppa:ondrej/php`, obnoví metadata a kontrolu zopakuje. Vyžaduje opravenou verzi **alespoň 8.4.27** a simuluje APT bez odstraňování balíčků.
 - Zálohuje `/etc/php` a `/etc/apache2` do `/var/backups/php84-migrator/`; uchovává předchozí handler a CLI alternativu pro rollback.
@@ -15,9 +15,15 @@ Skripty pro konzervativní migraci PHP na **8.4.27 nebo vyšší**. Na **Ubuntu 
 - Staré balíčky PHP **neodstraňuje**, aby byl možný návrat.
 - Po úspěšné migraci PHP také vypne MPTCP (`net.mptcp.enabled=0`) za běhu a trvale přes `/etc/sysctl.d/99-zz-kit-disable-mptcp.conf`, pokud jej jádro podporuje. Původní nastavení ukládá pro samostatný návrat.
 
-## AlmaLinux 9 – `httpd`, DNF a Remi (verze 1.5.0)
+## AlmaLinux 9 – přechod na PHP 8.4 (verze 1.6.0)
 
-AlmaLinux nepoužívá Ubuntu nástroje `apache2ctl`, `apt` ani `a2enmod`. Webová služba se zpravidla nazývá `httpd` a PHP zpracovává `php-fpm`. Konfiguraci PHP 8.4 lze na AlmaLinuxu 9 spravovat přes modul `php:remi-8.4`; při přechodu ze starších větví je vhodné použít řízený `dnf module switch-to`, nikoli Debian postup. Prodejci balíčků a rozšíření se mohou lišit, proto není automatické přepnutí staršího streamu v tomto skriptu povoleno.
+Na AlmaLinuxu se používá `httpd`, `dnf`, balíčky RPM a obvykle služba `php-fpm`. Skript má **samostatnou instalační větev**, která podporuje přepnutí standardních PHP RPM z verzí 7.x/8.0–8.3 na 8.4 pomocí příkazu doporučeného Remi:
+
+```bash
+dnf module switch-to php:remi-8.4/common
+```
+
+Pro automatické použití musí být splněno: AlmaLinux 9, standardní RPM PHP (`php-cli`, `php-common`, `php-fpm`), aktivní služba `php-fpm`, dostupný modul `remi-8.4` v konfigurovaném repozitáři a kompatibilní webový handler. Skript **neinstaluje automaticky Remi repozitář** ani nepřepíná vlastní nebo paralelní instalace PHP v `/opt/remi`.
 
 ```bash
 cd ~/sprava-serveru-kit
@@ -25,15 +31,17 @@ git pull --ff-only
 sudo bash php84-migrator/php84-migrate.sh --check
 ```
 
-Inventura vypíše stav `httpd`, `php-fpm`, verzi PHP CLI, instalované balíčky RPM a povolené PHP moduly. **`--run` na AlmaLinuxu 9 funguje pouze tehdy, když už PHP CLI používá 8.4, modul `remi-8.4` je aktivní a standardní služba `php-fpm` běží.** V takovém případě ověří kandidáta minimálně 8.4.27, uloží konfiguraci a seznam RPM balíčků do `/var/backups/php84-migrator/`, po potvrzení `UPDATE-ALMA` aktualizuje již nainstalované balíčky PHP a restartuje `php-fpm`. Nakonec zkontroluje PHP a vypne MPTCP, pokud jej jádro podporuje. Nepřidává repozitáře ani nepřepíná modulový stream. Předem zajisti snapshot serveru.
-
-Na AlmaLinuxu zatím **není automatický rollback balíčků**; používá se ověřený snapshot nebo individuálně posouzené `dnf history`. Pokud má server PHP 8.0–8.3, nestartuj ruční migraci bez kontroly výstupu `--check`, zejména modulů Remi a rozšíření.
-
-Samostatné vypnutí MPTCP funguje i na AlmaLinuxu:
+Pokud diagnostika vyhovuje, před pokračováním zajisti snapshot VM, zálohu databází a servisní okno. Potom:
 
 ```bash
-sudo bash php84-migrator/php84-migrate.sh --disable-mptcp
+sudo bash php84-migrator/php84-migrate.sh --run
 ```
+
+Skript před instalací zkontroluje kandidáta PHP **minimálně 8.4.27** v `remi-modular`, ověří konfiguraci PHP-FPM/httpd/nginx a provede náhled transakce `dnf --assumeno module switch-to php:remi-8.4/common`. Pokud DNF plánuje odstranění balíčků, migraci zastaví k ručnímu posouzení. Po zobrazení transakce vyžaduje potvrzení **`SWITCH-PHP84`**.
+
+Před změnou zálohuje konfiguraci PHP a webových služeb, seznam RPM a PHP rozšíření do `/var/backups/php84-migrator/almalinux-...`. Po aktualizaci porovná dostupná rozšíření, ověří verzi PHP, modul `remi-8.4`, konfiguraci PHP-FPM a znovu spustí `php-fpm`. Po úspěchu vypne MPTCP, pokud je podporováno.
+
+**Omezení:** Přepnutí modulového streamu může mít vliv na kompatibilitu aplikací a RPM instalační skripty mohou restartovat služby. Skript neprovádí automatický návrat balíčků nebo databází. Při selhání použij ověřený snapshot a posuď `dnf history`. Náhled DNF není zárukou stejné následné transakce; před spuštěním je nutná kontrola.
 
 ## Univerzální diagnostika (verze 1.3.0)
 
@@ -45,7 +53,7 @@ git pull --ff-only
 sudo bash php84-migrator/php84-migrate.sh --check
 ```
 
-Pokud Apache neběží, `--check` dokončí inventuru; výsledek **NOT ELIGIBLE** pro Ubuntu `mod_php` neznamená, že server nevyužívá PHP. AlmaLinux se hodnotí zvlášť podle PHP-FPM a Remi. Může používat Nginx + PHP-FPM, samostatné FPM, CLI/cron nebo Apache záměrně mimo provoz. Automatické `--run` nadále vyžaduje **běžící Apache s `mod_php`**, aby nedošlo k nechtěnému startu služby nebo přepnutí jiného PHP handleru. Po zjištění skutečné konfigurace lze připravit bezpečnou migraci dané varianty.
+Pokud Apache neběží, `--check` dokončí inventuru; výsledek **NOT ELIGIBLE** pro Ubuntu `mod_php` neznamená, že server nevyužívá PHP. AlmaLinux se hodnotí zvlášť podle PHP-FPM, balíčků RPM a dostupnosti modulu Remi 8.4. Může používat Nginx + PHP-FPM, samostatné FPM, CLI/cron nebo Apache záměrně mimo provoz. Automatické `--run` nadále vyžaduje **běžící Apache s `mod_php`**, aby nedošlo k nechtěnému startu služby nebo přepnutí jiného PHP handleru. Po zjištění skutečné konfigurace lze připravit bezpečnou migraci dané varianty.
 
 ## Vypnutí MPTCP (verze 1.4.0)
 
@@ -123,7 +131,7 @@ sudo bash php84-migrator/php84-migrate.sh --rollback
 Režimy skriptu:
 
 - `--check`: čtecí diagnostika prostředí i bez Apache (výchozí režim)
-- `--run`: Ubuntu – migrace Apache mod_php; AlmaLinux 9 – bezpečnostní aktualizace již aktivní větve Remi PHP 8.4
+- `--run`: Ubuntu – migrace Apache mod_php; AlmaLinux 9 – přepnutí standardního PHP na Remi 8.4 nebo aktualizace aktivního PHP 8.4
 - `--status`: stav OS, PHP CLI, Apache, Nginxu a PHP-FPM
 - `--rollback`: vrátí předchozí Apache PHP modul a CLI alternativu po potvrzení `ROLLBACK`
 - `--disable-mptcp`: vypne MPTCP nyní i po restartu (bez zásahu do PHP/Apache)
