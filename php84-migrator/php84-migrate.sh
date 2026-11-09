@@ -416,13 +416,16 @@ almalinux_update() {
   say "Backup created in $d."
 
   if (( switch_required )); then
+    # switch-to performs the PHP stream replacement and package upgrades in
+    # one transaction. Do not launch an unpreviewed second DNF upgrade.
     if ! dnf -y module switch-to php:remi-8.4/common; then
       fail "DNF module switch failed. Review dnf history, packages and backup $d; do not restart PHP-FPM blindly."
     fi
-  fi
-  # Update only currently installed standard PHP packages; no --allowerasing.
-  if ! dnf -y upgrade "${installed_php[@]}"; then
-    fail "DNF PHP RPM update failed. Review dnf history and backup $d."
+  else
+    # This exact upgrade operation was previewed with --assumeno above.
+    if ! dnf -y upgrade "${installed_php[@]}"; then
+      fail "DNF PHP RPM update failed. Review dnf history and backup $d."
+    fi
   fi
 
   local actual_enabled actual_minor
