@@ -6,7 +6,7 @@ export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C.UTF-8
 umask 077
 
-VERSION='1.5.0'
+VERSION='1.6.0'
 TARGET='8.4'
 MIN_FIXED='8.4.27'
 STATE_ROOT='/var/backups/php84-migrator'
@@ -33,14 +33,14 @@ if [[ "$ACTION" == '--help' ]]; then
   cat <<'EOF'
 Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback|--disable-mptcp|--restore-mptcp]
   --check       Read-only inventory: Ubuntu / AlmaLinux, Apache/httpd, Nginx, FPM, CLI.
-  --run         Ubuntu: migrate Apache mod_php. AlmaLinux 9: update existing Remi PHP 8.4.
+  --run         Ubuntu: migrate mod_php. AlmaLinux 9: switch PHP 7/8 to Remi 8.4.
   --status      Show OS, PHP CLI and web-stack status without requiring Apache.
   --rollback    Restore previous Apache mod_php and CLI alternative.
   --disable-mptcp   Disable MPTCP now and persistently (no Apache/PHP changes).
   --restore-mptcp   Restore MPTCP settings saved by the first disable.
-Automatic --run: Ubuntu 22.04/24.04 Apache mod_php, or AlmaLinux 9 with
-active php-fpm, PHP CLI 8.4 and php:remi-8.4 already enabled.
-AlmaLinux stream SWITCHING (e.g. PHP 8.1 -> 8.4) requires manual review.
+Automatic --run: Ubuntu 22.04/24.04 Apache mod_php, or AlmaLinux 9
+with standard PHP RPMs, active php-fpm and available remi-8.4 module.
+AlmaLinux: previews DNF package removals and requires SWITCH-PHP84 approval.
 --run also disables MPTCP after a successful PHP migration, if supported.
 The old PHP packages remain installed. PHP rollback does NOT restore MPTCP.
 EOF
@@ -292,78 +292,154 @@ fi
 
 # AlmaLinux requires DNF and PHP-FPM, not Debian's mod_php/apt workflow.
 almalinux_update() {
-  local php_minor enabled_stream candidate d confpath answer
+  local php_minor enabled_stream module_catalog candidate d confpath answer
+  local switch_required=0 preview_rc=0 preview_file=''
   local -a installed_php=() backup_paths=()
   need dnf
   need rpm
   need php
   need php-fpm
   need systemctl
+
   [[ "${VERSION_ID:-}" == 9 || "${VERSION_ID:-}" == 9.* ]] ||
-    fail 'AlmaLinux automatic PHP maintenance is limited to major version 9.'
+    fail 'Automatic AlmaLinux PHP migration supports only AlmaLinux 9.'
   systemctl is-active --quiet php-fpm ||
-    fail 'Standard php-fpm service is not active; use --check to identify the PHP handler.'
+    fail 'The standard php-fpm service is not active; identify the actual PHP handler with --check.'
+  rpm -q php-cli php-common php-fpm >/dev/null ||
+    fail 'Standard php-cli, php-common and php-fpm RPM packages must be installed.'
+  [[ "$(rpm -qf "$(readlink -f "$(command -v php)")" --qf '%{NAME}' 2>/dev/null)" == php-cli ]] ||
+    fail 'The active PHP CLI does not belong to the standard php-cli RPM; possible parallel/custom installation.'
+
   php_minor="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)" ||
-    fail 'Cannot query PHP CLI version.'
-  [[ "$php_minor" == 8.4 ]] ||
-    fail "PHP $php_minor detected. AlmaLinux stream switching is NOT automatic; use --check and review migration."
+    fail 'Cannot determine PHP CLI version.'
+  [[ "$php_minor" =~ ^(7[.][0-4]|8[.][0-4])$ ]] ||
+    fail "Source PHP $php_minor unsupported: expected standard PHP 7.x or PHP 8.0-8.4."
+
   enabled_stream="$(dnf -q module list php --enabled 2>/dev/null)" ||
-    fail 'Cannot inspect enabled DNF module stream.'
-  [[ "$enabled_stream" =~ remi-8[.]4 ]] ||
-    fail 'PHP stream remi-8.4 is not enabled. Refusing any DNF module changes.'
-  php-fpm -t || fail 'Existing PHP-FPM configuration fails validation.'
+    fail 'Cannot inspect enabled PHP module stream.'
+  module_catalog="$(dnf -q module list php 2>/dev/null)" ||
+    fail 'Cannot read available PHP module streams. Check Remi installation and DNF metadata.'
+  [[ "$module_catalog" =~ remi-8[.]4 ]] ||
+    fail 'Remi 8.4 stream not available. Configure the trusted Remi repository (remi-modular) before running migration.'
+
+  # Query Remi's PHP 8.4 packages even if the stream is not enabled yet.
+  # Require an explicitly patched candidate before changing module streams.
+  candidate="$(dnf -q repoquery --disable-modular-filtering --qf '%{version} %{repoid}' php-cli 2>/dev/null |
+    awk '$1 ~ /^8[.]4[.][0-9]+$/ && $2 ~ /^remi-modular/ {print $1}' |
+    sort -V | tail -n 1)" ||
+    fail 'DNF repoquery failed. Install/enable dnf-plugins-core and remi-modular, then retry.'
+  [[ "$candidate" =~ ^8[.]4[.][0-9]+$ ]] ||
+    fail "No PHP 8.4 candidate visible in remi-modular (got: ${candidate:-none}). Check repository access."
+  php -r 'exit(version_compare($argv[1], $argv[2], ">=") ? 0 : 1);' -- "$candidate" "$MIN_FIXED" ||
+    fail "Available PHP $candidate is older than mandatory $MIN_FIXED."
+  say "Available PHP 8.4: $candidate (Remi modular)"
+
+  php-fpm -t || fail 'Existing PHP-FPM configuration test failed.'
   if systemctl is-active --quiet httpd; then
     need httpd
-    httpd -t || fail 'Existing httpd configtest failed.'
+    httpd -t || fail 'Existing httpd configuration test failed.'
+    local httpd_modules=''
+    httpd_modules="$(httpd -M 2>/dev/null)" || fail 'Cannot inspect Apache httpd modules.'
+    [[ ! "$httpd_modules" =~ [[:space:]]php_module[[:space:]] ]] ||
+      fail 'Apache mod_php detected; automatic AlmaLinux migration expects PHP-FPM. Review Apache handler.'
   fi
   if systemctl is-active --quiet nginx; then
     need nginx
-    nginx -t || fail 'Existing nginx configtest failed.'
+    nginx -t || fail 'Existing nginx configuration test failed.'
   fi
 
-  # Fail closed unless DNF can see a sufficiently new candidate before changes.
-  candidate="$(dnf -q repoquery --latest-limit 1 --qf '%{version}' php-cli 2>/dev/null |
-    awk '$1 ~ /^8[.]4[.][0-9]+$/ {print $1}')" ||
-    fail 'DNF repoquery for PHP failed; check Remi repository metadata.'
-  [[ "$candidate" =~ ^8[.]4[.][0-9]+$ ]] ||
-    fail "Valid PHP 8.4 candidate not found (${candidate:-none})."
-  php -r 'exit(version_compare($argv[1], $argv[2], ">=") ? 0 : 1);' -- "$candidate" "$MIN_FIXED" ||
-    fail "PHP candidate $candidate is older than required $MIN_FIXED."
-  say "AlmaLinux Remi PHP candidate: $candidate"
   mapfile -t installed_php < <(rpm -qa --qf '%{NAME}\n' |
     awk '$1 == "php" || $1 ~ /^php-/ {print $1}' | sort -u)
-  (( ${#installed_php[@]} )) || fail 'No standard PHP RPM packages found.'
-  rpm -q php-cli php-fpm >/dev/null ||
-    fail 'Standard php-cli and php-fpm RPM packages must both be installed.'
-  say "Installed PHP packages to update: ${installed_php[*]}"
-  say 'No DNF module switching, repository installation or --allowerasing is performed.'
-  read -r -p 'Type UPDATE-ALMA after taking a full server snapshot: ' answer < /dev/tty
-  [[ "$answer" == UPDATE-ALMA ]] || fail 'Cancelled.'
+  (( ${#installed_php[@]} )) || fail 'No standard PHP RPM packages installed.'
+  say "Currently installed PHP RPMs: ${installed_php[*]}"
 
+  if [[ "$php_minor" == 8.4 && "$enabled_stream" =~ remi-8[.]4 ]]; then
+    say 'Remi 8.4 is already active: updating installed PHP RPMs.'
+  else
+    switch_required=1
+    say "Switching PHP $php_minor to php:remi-8.4/common (DNF4 module switch-to)."
+  fi
+
+  # DNF --assumeno is a transaction preview; a declined transaction may have a
+  # nonzero exit code. Detect success by a complete transaction summary.
+  # A module switch can remove incompatible extensions: FAIL CLOSED.
   mkdir -p "$STATE_ROOT"
   d="$(mktemp -d "$STATE_ROOT/almalinux-$(date +%Y%m%d-%H%M%S)-XXXXXXXX")"
-  for confpath in /etc/php.ini /etc/php.d /etc/php-fpm.conf /etc/php-fpm.d /etc/httpd /etc/nginx; do
+  preview_file="$d/dnf-preview.txt"
+  if (( switch_required )); then
+    dnf --refresh --assumeno module switch-to php:remi-8.4/common > "$preview_file" 2>&1 ||
+      preview_rc=$?
+  else
+    dnf --refresh --assumeno upgrade "${installed_php[@]}" > "$preview_file" 2>&1 ||
+      preview_rc=$?
+  fi
+  say "DNF preview recorded: $preview_file (exit $preview_rc)"
+  if ! grep -Eq '(^Transaction Summary|^Nothing to do[.]?$)' "$preview_file"; then
+    sed -n '1,100p' "$preview_file"
+    fail "DNF did not produce a valid preview. No PHP packages were changed; inspect $preview_file."
+  fi
+  if grep -Eiq '^[[:space:]]*(Removing|Erasing|Removing dependent packages|Removing unused dependencies):' "$preview_file"; then
+    say 'DNF proposes removals; review package and extension compatibility:'
+    sed -n '1,180p' "$preview_file"
+    fail "Package removal detected in DNF preview; no changes applied. Inspect $preview_file."
+  fi
+  if grep -Eiq '^Error:|^Problem:|conflicting requests|cannot install the best' "$preview_file"; then
+    fail "Dependency issue detected in DNF preview: $preview_file."
+  fi
+
+  say "DNF transaction preview (first 110 lines):"
+  sed -n '1,110p' "$preview_file"
+  say 'The migration cannot automatically roll back RPM packages or PHP application data.'
+  read -r -p 'Type SWITCH-PHP84 after taking a full VM snapshot: ' answer < /dev/tty
+  [[ "$answer" == SWITCH-PHP84 ]] || fail 'Cancelled.'
+
+  for confpath in /etc/php.ini /etc/php.d /etc/php-fpm.conf /etc/php-fpm.d /etc/httpd /etc/nginx /etc/dnf/modules.d/php.module; do
     [[ -e "$confpath" ]] && backup_paths+=("${confpath#/}")
   done
-  (( ${#backup_paths[@]} )) || fail 'No configuration paths available for backup.'
+  (( ${#backup_paths[@]} )) || fail 'No configuration paths found to back up.'
   tar --acls --xattrs -czpf "$d/etc-php-web.tar.gz" -C / "${backup_paths[@]}"
   rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\n' | sort > "$d/rpm-before.txt"
-  dnf -q module list php --enabled > "$d/php-module-before.txt" 2>&1 || true
-  php -m > "$d/php-modules-before.txt" 2>&1 || true
-  say "AlmaLinux config backup: $d"
-  say 'Updating installed PHP RPMs in the enabled Remi 8.4 stream.'
-  if ! dnf -y --refresh upgrade "${installed_php[@]}"; then
-    fail "DNF update failed; inspect DNF history and $d. No automatic rollback is available."
+  printf '%s\n' "$enabled_stream" > "$d/php-module-before.txt"
+  php -m | LC_ALL=C sort -u > "$d/php-modules-before.txt"
+  say "Backup created in $d."
+
+  if (( switch_required )); then
+    if ! dnf -y module switch-to php:remi-8.4/common; then
+      fail "DNF module switch failed. Review dnf history, packages and backup $d; do not restart PHP-FPM blindly."
+    fi
   fi
+  # Update only currently installed standard PHP packages; no --allowerasing.
+  if ! dnf -y upgrade "${installed_php[@]}"; then
+    fail "DNF PHP RPM update failed. Review dnf history and backup $d."
+  fi
+
+  local actual_enabled actual_minor
+  actual_enabled="$(dnf -q module list php --enabled 2>/dev/null)" ||
+    fail 'Could not confirm enabled PHP module after migration.'
+  [[ "$actual_enabled" =~ remi-8[.]4 ]] ||
+    fail 'PHP module stream is NOT remi-8.4 after switch. Investigate DNF state.'
+  actual_minor="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)" ||
+    fail 'Cannot read new PHP CLI version.'
+  [[ "$actual_minor" == 8.4 ]] || fail "Expected PHP 8.4, found $actual_minor."
   php -r 'exit(version_compare(PHP_VERSION, $argv[1], ">=") ? 0 : 1);' -- "$MIN_FIXED" ||
-    fail "Installed PHP remains older than $MIN_FIXED."
-  php-fpm -t || fail "Updated PHP-FPM config invalid; inspect $d."
-  systemctl restart php-fpm || fail 'PHP-FPM restart failed; inspect journalctl -u php-fpm.'
-  systemctl is-active --quiet php-fpm || fail 'PHP-FPM is not running after restart.'
-  if systemctl is-active --quiet httpd; then httpd -t || fail 'httpd configtest failed after update.'; fi
-  if systemctl is-active --quiet nginx; then nginx -t || fail 'nginx configtest failed after update.'; fi
-  say "AlmaLinux update completed: $(php -v | sed -n '1p')"
-  say "Backups in $d. Validate web applications; RPM rollback requires a snapshot."
+    fail "Installed PHP is older than required $MIN_FIXED."
+
+  php -m | LC_ALL=C sort -u > "$d/php-modules-after.txt"
+  comm -23 "$d/php-modules-before.txt" "$d/php-modules-after.txt" > "$d/php-modules-missing.txt" || true
+  if [[ -s "$d/php-modules-missing.txt" ]]; then
+    say 'CRITICAL: PHP modules disappeared during migration:'
+    cat "$d/php-modules-missing.txt"
+    fail "Do not restart php-fpm before resolving missing extensions. Review $d."
+  fi
+  php-fpm -t || fail "PHP-FPM configuration invalid after migration; investigate $d before restart."
+  systemctl restart php-fpm || fail "PHP-FPM restart failed; investigate journalctl -u php-fpm and $d."
+  systemctl is-active --quiet php-fpm || fail 'PHP-FPM is not active after restart.'
+  if systemctl is-active --quiet httpd; then httpd -t || fail 'httpd configtest failed after migration.'; fi
+  if systemctl is-active --quiet nginx; then nginx -t || fail 'nginx configtest failed after migration.'; fi
+
+  say "AlmaLinux PHP migration completed: $(php -v | sed -n '1p')"
+  say "Configuration and RPM inventory backup: $d"
+  say 'Validate application endpoints, DB access and error logs. Snapshot rollback is manual.'
   mptcp_disable
 }
 
