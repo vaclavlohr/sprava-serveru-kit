@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PHP 8.4 migration for Ubuntu 22.04/24.04; read-only inventory works across web stacks.
+# PHP 8.4 migration for Ubuntu 22.04/24.04; inventory for all web stacks.
 # Supports one-command migration with explicit operator approval.
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -29,52 +29,165 @@ esac
 if [[ "$ACTION" == '--help' ]]; then
   cat <<'EOF'
 Usage: sudo bash php84-migrate.sh [--check|--run|--status|--rollback]
-  --check       Read-only OS/PHP/web-stack inventory (default); works without Apache.
-  --run         Backup, install PHP 8.4, switch running Apache mod_php; prompts first.
-  --status      Display OS, Apache, nginx, PHP CLI and PHP-FPM state.
-  --rollback    Restore previous Apache PHP module and CLI alternative.
-Automatic --run: Ubuntu 22.04/24.04, running Apache mod_php, root.
-Nginx, PHP-FPM, inactive Apache, and CLI-only systems: diagnostic only.
+  --check       Read-only inventory: Apache, Nginx, PHP-FPM, PHP CLI (default).
+  --run         Backup, install PHP 8.4 and switch RUNNING Apache mod_php.
+  --status      Show OS, PHP CLI and web-stack status without requiring Apache.
+  --rollback    Restore previous Apache mod_php and CLI alternative.
+Automatic --run: Ubuntu 22.04/24.04, active Apache mod_php, root.
+Inactive Apache, Nginx, PHP-FPM, CLI-only: read-only diagnostics for now.
 The old PHP packages remain installed; rollback only switches configuration.
 EOF
   exit 0
 fi
 require_root
 
-# Keep the read-only diagnostics available even on a host without Apache, APT
-# or a running web server. Only the migration and rollback require those tools.
-read_os() {
-  [[ -r /etc/os-release ]] || return 1
-  # shellcheck source=/dev/null
-  source /etc/os-release
-}
-ubuntu_supported() {
-  [[ "${ID:-}" == ubuntu ]] || return 1
-  case "${VERSION_ID:-}:${VERSION_CODENAME:-}" in
-    22.04:jammy|24.04:noble) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-service_state() {
-  local unit="$1"
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl is-active "$unit" 2>/dev/null || true
+# Read-only inventory on all hosts, including hosts without Apache.
+# Preserve strict safety checks for --run/--rollback below.
+inventory() {
+  local release='unknown' apache_state='unknown' nginx_state='unknown'
+  local apache_modules='' php_modules='' fpm_packages='' php_fpm_services=''
+  local errors=() item
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    source /etc/os-release
+    release="${PRETTY_NAME:-${ID:-unknown}}"
+  fi
+  say "Host: $(hostname -f 2>/dev/null || hostname)"
+  say "OS: $release"
+  if command -v php >/dev/null 2>&1; then
+    say "Default PHP CLI: $(php -v 2>/dev/null | sed -n '1p')"
   else
-    printf 'unknown (systemctl unavailable)\n'
+    say 'Default PHP CLI: not installed / not in PATH'
+  fi
+  if command -v php8.4 >/dev/null 2>&1; then
+    say "PHP 8.4 CLI: $(php8.4 -v 2>/dev/null | sed -n '1p')"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    apache_state="$(systemctl is-active apache2 2>/dev/null || true)"
+    nginx_state="$(systemctl is-active nginx 2>/dev/null || true)"
+    php_fpm_services="$(systemctl list-units --all --plain --no-legend 'php*-fpm.service' 2>/dev/null | sed -n '1,15p')" || true
+  fi
+  say "Apache state: $apache_state"
+  say "Nginx state: $nginx_state"
+  if command -v dpkg-query >/dev/null 2>&1; then
+    fpm_packages="$(dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' 'php*-fpm' 2>/dev/null | awk '$2 ~ /^ii/ {print $1}' | paste -sd ',' -)" || true
+  fi
+  say "Installed PHP-FPM packages: ${fpm_packages:-none}"
+  if [[ -n "$php_fpm_services" ]]; then
+    say "PHP-FPM services:"
+    printf '%s\n' "$php_fpm_services"
+  else
+    say "PHP-FPM services: none found in systemd list"
+  fi
+  if [[ -d /etc/apache2/mods-enabled ]]; then
+    local module
+    shopt -s nullglob
+    for module in /etc/apache2/mods-enabled/php[0-9]*.load; do
+      php_modules+="${module##*/} "
+    done
+    shopt -u nullglob
+  fi
+  say "Enabled Apache PHP module links: ${php_modules:-none}"
+  if command -v apache2ctl >/dev/null 2>&1; then
+    apache_modules="$(apache2ctl -M 2>/dev/null)" || apache_modules=''
+    say 'Configured Apache virtual hosts (not proof of a running server):'
+    apache2ctl -S 2>&1 | grep -E 'namevhost|default server|\*:80' || true
+  fi
+
+  if [[ "$ACTION" == '--check' ]]; then
+    if [[ "${ID:-}" != ubuntu || ( "${VERSION_ID:-}" != 22.04 && "${VERSION_ID:-}" != 24.04 ) ]]; then
+      errors+=('Automatic migration supports only Ubuntu 22.04/24.04')
+    fi
+    if [[ "$apache_state" != active ]]; then
+      errors+=('Apache is not running; it will not be started automatically')
+    fi
+    if ! command -v apache2ctl >/dev/null 2>&1; then
+      errors+=('Apache is not installed or apache2ctl is missing')
+    else
+      [[ "$apache_modules" == *mpm_prefork_module* ]] || errors+=('Apache prefork MPM not detected')
+      [[ "$apache_modules" =~ [[:space:]]php_module[[:space:]] ]] || errors+=('Apache mod_php not detected')
+      [[ "$apache_modules" != *proxy_fcgi_module* ]] || errors+=('Apache proxy_fcgi enabled; FPM stack requires review')
+    fi
+    if grep -RIEqs '(php[0-9]+\.[0-9]+-fpm|/run/php/.*fpm\.sock|ProxyPassMatch)' \
+      /etc/apache2/sites-enabled /etc/apache2/conf-enabled 2>/dev/null; then
+      errors+=('Apache FPM/proxy handler reference detected')
+    fi
+    if (( ${#errors[@]} )); then
+      say 'Automatic mod_php migration: NOT ELIGIBLE; no changes made.'
+      for item in "${errors[@]}"; do say "  - $item"; done
+      say 'Review the detected web stack before enabling a migration path for it.'
+    else
+      say 'Automatic mod_php migration: preliminarily eligible; no changes made.'
+      say 'APT package availability and application compatibility are checked later.'
+    fi
   fi
 }
-php_module_links() {
-  local file found=0
+
+if [[ "$ACTION" == '--check' || "$ACTION" == '--status' ]]; then
+  inventory
+  exit 0
+fi
+
+need apache2ctl
+need dpkg-query
+need apt-get
+need update-alternatives
+
+if [[ "$ACTION" != '--rollback' && "$ACTION" != '--status' ]]; then
+  # Determine the Ubuntu release from os-release, never from the running kernel.
+  [[ -r /etc/os-release ]] || fail 'Cannot read /etc/os-release.'
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  [[ "${ID:-}" == 'ubuntu' ]] || fail "Only Ubuntu is supported (detected: ${ID:-unknown})."
+  case "${VERSION_ID:-}" in
+    22.04)
+      [[ "${VERSION_CODENAME:-}" == 'jammy' ]] || fail 'Ubuntu 22.04 codename mismatch; review OS installation.'
+      ;;
+    24.04)
+      [[ "${VERSION_CODENAME:-}" == 'noble' ]] || fail 'Ubuntu 24.04 codename mismatch; review OS installation.'
+      ;;
+    *) fail "Ubuntu ${VERSION_ID:-unknown} is not supported for automated PHP migration. Supported releases: 22.04 (Jammy) and 24.04 (Noble); upgrade the OS first if older." ;;
+  esac
+  systemctl is-active --quiet apache2 || fail 'Apache is not running.'
+  # Capture the complete module list once. grep -q on a pipeline under
+  # pipefail can close the reader early (SIGPIPE), falsely failing checks.
+  apache_modules="$(apache2ctl -M 2>/dev/null)" || fail 'Could not inspect Apache loaded modules.'
+  [[ "$apache_modules" == *mpm_prefork_module* ]] || fail 'Apache is not using mpm_prefork.'
+  [[ "$apache_modules" =~ [[:space:]]php_module[[:space:]] ]] || fail 'Apache mod_php is not active.'
+  if [[ "$apache_modules" == *proxy_fcgi_module* ]]; then
+    fail 'proxy_fcgi is enabled; review FPM configuration manually.'
+  fi
+  if grep -RIEqs '(php[0-9]+\.[0-9]+-fpm|/run/php/.*fpm\.sock|ProxyPassMatch)' \
+    /etc/apache2/sites-enabled /etc/apache2/conf-enabled 2>/dev/null; then
+    fail 'FPM/proxy configuration detected. Manual migration required.'
+  fi
+fi
+
+active_php_module() {
+  local p ver names=()
   shopt -s nullglob
-  for file in /etc/apache2/mods-enabled/php[0-9]*.load; do
-    printf '%s ' "${file##*/}"
-    found=1
+  for p in /etc/apache2/mods-enabled/php[0-9]*.load; do
+    ver="${p##*/}"; ver="${ver#php}"; ver="${ver%.load}"
+    [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+    names+=("$ver")
   done
   shopt -u nullglob
-  (( found == 1 )) || printf 'none'
-  printf '\n'
+  ((${#names[@]} == 1)) || fail "Expected exactly one enabled Apache PHP module; found ${#names[@]}"
+  printf '%s\n' "${names[0]}"
 }
-diagnostic_rollback() {
+
+status() {
+  say "Hostname: $(hostname -f 2>/dev/null || hostname)"
+  say "Apache PHP module: $(active_php_module)"
+  if command -v php >/dev/null; then php -v | sed -n '1p'; fi
+  if command -v php8.4 >/dev/null; then php8.4 -v | sed -n '1p'; fi
+  say "Apache: $(systemctl is-active apache2 || true)"
+  apache2ctl -S 2>&1 | grep -E 'namevhost|default server|\*:80' || true
+}
+
+if [[ "$ACTION" == '--status' ]]; then status; exit 0; fi
+
+rollback() {
   local d old alt
   [[ -d "$STATE_ROOT" ]] || fail "No rollback states in $STATE_ROOT"
   d="$(find "$STATE_ROOT" -mindepth 1 -maxdepth 1 -type d -name '20*' | LC_ALL=C sort | tail -1)"
@@ -96,14 +209,14 @@ diagnostic_rollback() {
     fi
   fi
   say 'Apache module restored. Packages and php.ini were NOT reverted; consult the backup archive if needed.'
-  diagnostic_status
+  status
 }
 
 if [[ "$ACTION" == '--rollback' ]]; then rollback; exit 0; fi
 
 old="$(active_php_module)"
 say "OS: Ubuntu ${VERSION_ID} (${VERSION_CODENAME}), Apache mod_php $old -> PHP $TARGET (minimum $MIN_FIXED)"
-diagnostic_status
+status
 if [[ "$old" == "$TARGET" ]]; then say 'Apache already uses PHP 8.4; no migration necessary.'; exit 0; fi
 [[ "$old" =~ ^(7\.[0-9]+|8\.[0-3])$ ]] || fail "Unsupported source PHP module $old"
 
@@ -126,6 +239,12 @@ while IFS= read -r pkg; do
 done < <(dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' "php${old}*" 2>/dev/null | awk '$2 ~ /^ii/ {print $1}' | sed 's/:amd64$//')
 mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
 say "Target extensions: ${pkgs[*]}"
+if [[ "$ACTION" == '--check' ]]; then
+  say 'Read-only check complete. --run will add the PHP PPA if necessary, then simulate installation.'
+  say 'Current virtual hosts:'
+  apache2ctl -S 2>&1 | grep -E 'namevhost|default server|\*:80' || true
+  exit 0
+fi
 
 # The migration is intentionally interactive; never designed for silent remote execution.
 read -r -p 'Type MIGRATE to back up, install and switch Apache: ' answer < /dev/tty
